@@ -5,6 +5,14 @@ const logger = require('../../utils/logger')
 const config = require('../../../config/config')
 const LRUCache = require('../../utils/lruCache')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const {
+  RESERVED_CUSTOM_HEADERS,
+  createOpenAICompatibleError,
+  isValidHeaderName,
+  normalizeProviderEndpoint,
+  normalizeStringArray,
+  validateProviderEndpoint
+} = require('../../utils/openaiCompatible')
 
 class OpenAIResponsesAccountService {
   constructor() {
@@ -52,7 +60,15 @@ class OpenAIResponsesAccountService {
       quotaResetTime = '00:00', // 额度重置时间（HH:mm格式）
       rateLimitDuration = 60, // 限流时间（分钟）
       disableAutoProtection = false, // 是否关闭自动防护（429/401/400/529 不自动禁用）
-      providerEndpoint = 'responses' // Provider 端点类型：responses | auto
+      providerEndpoint = 'responses', // Provider 端点类型
+      boundModel = '',
+      modelAliases = [],
+      supportsTools = true,
+      supportsImages = false,
+      supportsReasoning = false,
+      maxInputTokens = 0,
+      maxOutputTokens = 0,
+      customHeaders = {}
     } = options
 
     // 验证必填字段
@@ -61,12 +77,8 @@ class OpenAIResponsesAccountService {
     }
 
     // 验证 providerEndpoint 枚举值
-    const validEndpoints = ['responses', 'auto']
-    if (!validEndpoints.includes(providerEndpoint)) {
-      throw new Error(
-        `Invalid providerEndpoint: ${providerEndpoint}. Must be one of: ${validEndpoints.join(', ')}`
-      )
-    }
+    validateProviderEndpoint(providerEndpoint)
+    const normalizedCustomHeaders = this._normalizeCustomHeaders(customHeaders)
 
     // 规范化 baseApi（确保不以 / 结尾）
     const normalizedBaseApi = baseApi.endsWith('/') ? baseApi.slice(0, -1) : baseApi
@@ -105,8 +117,16 @@ class OpenAIResponsesAccountService {
       lastResetDate: redis.getDateStringInTimezone(),
       quotaResetTime,
       quotaStoppedAt: '',
-      disableAutoProtection: disableAutoProtection.toString(), // 关闭自动防护
-      providerEndpoint // Provider 端点类型：responses(默认) | auto
+      disableAutoProtection: this._normalizeBoolean(disableAutoProtection, false), // 关闭自动防护
+      providerEndpoint,
+      boundModel: this._normalizeBoundModel(boundModel),
+      modelAliases: JSON.stringify(this._normalizeStringList(modelAliases)),
+      supportsTools: this._normalizeBoolean(supportsTools, true),
+      supportsImages: this._normalizeBoolean(supportsImages, false),
+      supportsReasoning: this._normalizeBoolean(supportsReasoning, false),
+      maxInputTokens: this._normalizeNonNegativeInt(maxInputTokens).toString(),
+      maxOutputTokens: this._normalizeNonNegativeInt(maxOutputTokens).toString(),
+      customHeaders: this._encryptCustomHeaders(normalizedCustomHeaders)
     }
 
     // 保存到 Redis
@@ -114,14 +134,14 @@ class OpenAIResponsesAccountService {
 
     logger.success(`Created OpenAI-Responses account: ${name} (${accountId})`)
 
-    return {
-      ...accountData,
-      apiKey: '***' // 返回时隐藏敏感信息
-    }
+    const safeAccountData = { ...accountData, apiKey: '***' }
+    this._hydrateOpenAICompatibleFields(safeAccountData, { includeSecretHeaders: false })
+
+    return safeAccountData
   }
 
   // 获取账户
-  async getAccount(accountId) {
+  async getAccount(accountId, options = {}) {
     const client = redis.getClientSafe()
     const key = `${this.ACCOUNT_KEY_PREFIX}${accountId}`
     const accountData = await client.hgetall(key)
@@ -132,6 +152,7 @@ class OpenAIResponsesAccountService {
 
     // 解密敏感数据
     accountData.apiKey = this._decryptSensitiveData(accountData.apiKey)
+    this._hydrateOpenAICompatibleFields(accountData, options)
 
     // 解析 JSON 字段
     if (accountData.proxy) {
@@ -147,10 +168,12 @@ class OpenAIResponsesAccountService {
 
   // 更新账户
   async updateAccount(accountId, updates) {
-    const account = await this.getAccount(accountId)
+    const account = await this.getAccount(accountId, { includeSecretHeaders: true })
     if (!account) {
       throw new Error('Account not found')
     }
+
+    updates = { ...updates }
 
     // 处理敏感字段加密
     if (updates.apiKey) {
@@ -177,17 +200,43 @@ class OpenAIResponsesAccountService {
 
     // 验证 providerEndpoint 枚举值
     if (updates.providerEndpoint !== undefined) {
-      const validEndpoints = ['responses', 'auto']
-      if (!validEndpoints.includes(updates.providerEndpoint)) {
-        throw new Error(
-          `Invalid providerEndpoint: ${updates.providerEndpoint}. Must be one of: ${validEndpoints.join(', ')}`
-        )
-      }
+      validateProviderEndpoint(updates.providerEndpoint)
     }
 
     // 自动防护开关
     if (updates.disableAutoProtection !== undefined) {
-      updates.disableAutoProtection = updates.disableAutoProtection.toString()
+      updates.disableAutoProtection = this._normalizeBoolean(updates.disableAutoProtection, false)
+    }
+
+    if (updates.boundModel !== undefined) {
+      updates.boundModel = this._normalizeBoundModel(updates.boundModel)
+    }
+
+    if (updates.modelAliases !== undefined) {
+      updates.modelAliases = JSON.stringify(this._normalizeStringList(updates.modelAliases))
+    }
+
+    if (updates.supportsTools !== undefined) {
+      updates.supportsTools = this._normalizeBoolean(updates.supportsTools, true)
+    }
+    if (updates.supportsImages !== undefined) {
+      updates.supportsImages = this._normalizeBoolean(updates.supportsImages, false)
+    }
+    if (updates.supportsReasoning !== undefined) {
+      updates.supportsReasoning = this._normalizeBoolean(updates.supportsReasoning, false)
+    }
+    if (updates.maxInputTokens !== undefined) {
+      updates.maxInputTokens = this._normalizeNonNegativeInt(updates.maxInputTokens).toString()
+    }
+    if (updates.maxOutputTokens !== undefined) {
+      updates.maxOutputTokens = this._normalizeNonNegativeInt(updates.maxOutputTokens).toString()
+    }
+    if (Object.prototype.hasOwnProperty.call(updates, 'customHeaders')) {
+      const normalizedCustomHeaders = this._normalizeCustomHeaders(
+        updates.customHeaders,
+        account.customHeaders || {}
+      )
+      updates.customHeaders = this._encryptCustomHeaders(normalizedCustomHeaders)
     }
 
     // 更新 Redis
@@ -252,6 +301,7 @@ class OpenAIResponsesAccountService {
 
       // 隐藏敏感信息
       accountData.apiKey = '***'
+      this._hydrateOpenAICompatibleFields(accountData, { includeSecretHeaders: false })
 
       // 解析 JSON 字段
       if (accountData.proxy) {
@@ -567,6 +617,162 @@ class OpenAIResponsesAccountService {
     }
 
     return false
+  }
+
+  _normalizeBoolean(value, defaultValue = false) {
+    if (value === undefined || value === null || value === '') {
+      return defaultValue ? 'true' : 'false'
+    }
+    if (value === true || value === 'true') {
+      return 'true'
+    }
+    if (value === false || value === 'false') {
+      return 'false'
+    }
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase()
+      if (['1', 'yes', 'on'].includes(normalized)) {
+        return 'true'
+      }
+      if (['0', 'no', 'off'].includes(normalized)) {
+        return 'false'
+      }
+    }
+    return value ? 'true' : 'false'
+  }
+
+  _normalizeNonNegativeInt(value) {
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return 0
+    }
+    return Math.floor(parsed)
+  }
+
+  _normalizeStringList(value) {
+    const items = normalizeStringArray(value)
+    const seen = new Set()
+    const result = []
+    for (const item of items) {
+      if (this._hasControlCharacters(item)) {
+        throw createOpenAICompatibleError('modelAliases cannot contain control characters')
+      }
+      if (!seen.has(item)) {
+        seen.add(item)
+        result.push(item)
+      }
+    }
+    return result
+  }
+
+  _normalizeBoundModel(value) {
+    const model = typeof value === 'string' ? value.trim() : ''
+    if (this._hasControlCharacters(model)) {
+      throw createOpenAICompatibleError('boundModel cannot contain control characters')
+    }
+    return model
+  }
+
+  _hasControlCharacters(value) {
+    return Array.from(value || '').some((char) => {
+      const code = char.charCodeAt(0)
+      return code === 127 || code < 32
+    })
+  }
+
+  _normalizeCustomHeaders(value, previous = {}) {
+    if (value === undefined || value === null || value === '') {
+      return {}
+    }
+
+    let source = value
+    if (typeof value === 'string') {
+      try {
+        source = JSON.parse(value)
+      } catch {
+        throw createOpenAICompatibleError('customHeaders must be a JSON object')
+      }
+    }
+
+    if (!source || typeof source !== 'object' || Array.isArray(source)) {
+      throw createOpenAICompatibleError('customHeaders must be a JSON object')
+    }
+
+    const normalized = {}
+    for (const [rawKey, rawValue] of Object.entries(source)) {
+      const key = String(rawKey).trim()
+      const lowerKey = key.toLowerCase()
+
+      if (!isValidHeaderName(key)) {
+        throw createOpenAICompatibleError(`Invalid custom header name: ${key}`)
+      }
+      if (RESERVED_CUSTOM_HEADERS.has(lowerKey)) {
+        throw createOpenAICompatibleError(`Custom header ${key} is reserved and cannot be set`)
+      }
+
+      if (rawValue === '***') {
+        if (previous && Object.prototype.hasOwnProperty.call(previous, key)) {
+          normalized[key] = previous[key]
+        }
+        continue
+      }
+
+      if (!['string', 'number', 'boolean'].includes(typeof rawValue)) {
+        throw createOpenAICompatibleError(`Custom header ${key} must be string, number, or boolean`)
+      }
+
+      normalized[key] = String(rawValue)
+    }
+    return normalized
+  }
+
+  _encryptCustomHeaders(headers) {
+    if (!headers || Object.keys(headers).length === 0) {
+      return ''
+    }
+    return this._encryptSensitiveData(JSON.stringify(headers))
+  }
+
+  _decryptCustomHeaders(encrypted) {
+    if (!encrypted) {
+      return {}
+    }
+    const decrypted = this._decryptSensitiveData(encrypted)
+    if (!decrypted) {
+      return {}
+    }
+    try {
+      const parsed = JSON.parse(decrypted)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  _maskCustomHeaders(headers) {
+    if (!headers || typeof headers !== 'object') {
+      return {}
+    }
+    return Object.keys(headers).reduce((masked, key) => {
+      masked[key] = '***'
+      return masked
+    }, {})
+  }
+
+  _hydrateOpenAICompatibleFields(accountData, options = {}) {
+    accountData.providerEndpoint = normalizeProviderEndpoint(accountData.providerEndpoint)
+    accountData.boundModel = accountData.boundModel || ''
+    accountData.modelAliases = this._normalizeStringList(accountData.modelAliases)
+    accountData.supportsTools = accountData.supportsTools !== 'false'
+    accountData.supportsImages = accountData.supportsImages === 'true'
+    accountData.supportsReasoning = accountData.supportsReasoning === 'true'
+    accountData.maxInputTokens = parseInt(accountData.maxInputTokens, 10) || 0
+    accountData.maxOutputTokens = parseInt(accountData.maxOutputTokens, 10) || 0
+
+    const decryptedHeaders = this._decryptCustomHeaders(accountData.customHeaders)
+    accountData.customHeaders = options.includeSecretHeaders
+      ? decryptedHeaders
+      : this._maskCustomHeaders(decryptedHeaders)
   }
 
   // 获取限流信息

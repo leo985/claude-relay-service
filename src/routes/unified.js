@@ -10,8 +10,14 @@ const {
 const openaiRoutes = require('./openaiRoutes')
 const { CODEX_CLI_INSTRUCTIONS } = require('./openaiRoutes')
 const apiKeyService = require('../services/apiKeyService')
+const unifiedOpenAIScheduler = require('../services/scheduler/unifiedOpenAIScheduler')
 const GeminiToOpenAIConverter = require('../services/geminiToOpenAI')
 const CodexToOpenAIConverter = require('../services/codexToOpenAI')
+const {
+  clonePlainObject,
+  getRequestFeaturesFromBody,
+  isOpenAINamespace
+} = require('../utils/openaiCompatible')
 
 const router = express.Router()
 
@@ -42,14 +48,76 @@ function detectBackendFromModel(modelName) {
   return 'claude'
 }
 
+async function shouldRouteToOpenAICompatible(req, requestedModel, requestFeatures) {
+  if (process.env.ENABLE_OPENAI_COMPATIBLE_ROUTING === 'false') {
+    return false
+  }
+
+  const apiKeyData = req.apiKey || {}
+  const binding = apiKeyData.openaiAccountId || ''
+
+  // Respect explicit non-responses OpenAI account bindings; only responses: participates here.
+  if (binding && !binding.startsWith('responses:') && !binding.startsWith('group:')) {
+    return false
+  }
+
+  if (binding.startsWith('responses:')) {
+    return true
+  }
+
+  if (binding.startsWith('group:')) {
+    const groupId = binding.replace('group:', '')
+    if (await unifiedOpenAIScheduler.groupHasOpenAIResponsesAccount(groupId)) {
+      return true
+    }
+  }
+
+  if (await unifiedOpenAIScheduler.hasOpenAIResponsesModelMatch(requestedModel, requestFeatures)) {
+    return true
+  }
+
+  const backend = detectBackendFromModel(requestedModel)
+  const isUnknownOpenAIModel = backend === 'claude' && !requestedModel?.startsWith?.('claude-')
+  if (isOpenAINamespace(req) && isUnknownOpenAIModel) {
+    return unifiedOpenAIScheduler.hasAnyOpenAIResponsesAccount(requestedModel, requestFeatures)
+  }
+
+  return false
+}
+
 // 🚀 智能后端路由处理器
 async function routeToBackend(req, res, requestedModel) {
+  // 检查权限
+  const { permissions } = req.apiKey
+  const requestFeatures =
+    req._openaiCompatibleRequestFeatures ||
+    getRequestFeaturesFromBody(req.body || {}, 'chat_completions')
+
+  if (await shouldRouteToOpenAICompatible(req, requestedModel, requestFeatures)) {
+    logger.info(`🔀 Routing request - Model: ${requestedModel}, Backend: openai-compatible`)
+    if (!apiKeyService.hasPermission(permissions, 'openai')) {
+      return res.status(403).json({
+        error: {
+          message: 'This API key does not have permission to access OpenAI',
+          type: 'permission_denied',
+          code: 'permission_denied'
+        }
+      })
+    }
+
+    const codexConverter = new CodexToOpenAIConverter()
+    req.body = codexConverter.buildRequestFromOpenAI(req.body)
+    req.body.instructions = CODEX_CLI_INSTRUCTIONS
+    req._fromUnifiedEndpoint = true
+    req._forceOpenAICompatibleRelay = true
+    req.url = '/v1/responses'
+
+    return await openaiRoutes.handleResponses(req, res)
+  }
+
   const backend = detectBackendFromModel(requestedModel)
 
   logger.info(`🔀 Routing request - Model: ${requestedModel}, Backend: ${backend}`)
-
-  // 检查权限
-  const { permissions } = req.apiKey
 
   if (backend === 'claude') {
     // Claude 后端：通过 OpenAI 兼容层
@@ -352,6 +420,16 @@ router.post('/v1/chat/completions', authenticateApiKey, async (req, res) => {
 
     const requestedModel = req.body.model || 'claude-3-5-sonnet-20241022'
     req.body.model = requestedModel // 确保模型已设置
+    req._openaiCompatibleOriginal = {
+      path: req.path,
+      originalUrl: req.originalUrl,
+      body: clonePlainObject(req.body),
+      endpointKind: 'chat_completions'
+    }
+    req._openaiCompatibleRequestFeatures = getRequestFeaturesFromBody(
+      req._openaiCompatibleOriginal.body,
+      'chat_completions'
+    )
 
     // 使用统一的后端路由处理器
     await routeToBackend(req, res, requestedModel)

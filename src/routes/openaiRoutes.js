@@ -20,6 +20,11 @@ const {
   extractOpenAICacheReadTokens
 } = require('../utils/requestDetailHelper')
 const requestBodyRuleService = require('../services/requestBodyRuleService')
+const {
+  clonePlainObject,
+  detectEndpointKindFromPath,
+  getRequestFeaturesFromBody
+} = require('../utils/openaiCompatible')
 
 // Codex CLI 系统提示词（非 Codex CLI 客户端请求时注入，统一端点也使用）
 const CODEX_CLI_INSTRUCTIONS =
@@ -175,7 +180,12 @@ async function applyRateLimitTracking(
 }
 
 // 使用统一调度器选择 OpenAI 账户
-async function getOpenAIAuthToken(apiKeyData, sessionId = null, requestedModel = null) {
+async function getOpenAIAuthToken(
+  apiKeyData,
+  sessionId = null,
+  requestedModel = null,
+  requestFeatures = {}
+) {
   try {
     // 生成会话哈希（如果有会话ID）
     const sessionHash = sessionId
@@ -186,7 +196,8 @@ async function getOpenAIAuthToken(apiKeyData, sessionId = null, requestedModel =
     const result = await unifiedOpenAIScheduler.selectAccountForApiKey(
       apiKeyData,
       sessionHash,
-      requestedModel
+      requestedModel,
+      requestFeatures
     )
 
     if (!result || !result.accountId) {
@@ -316,6 +327,15 @@ const handleResponses = async (req, res) => {
       })
     }
 
+    if (!req._openaiCompatibleOriginal) {
+      req._openaiCompatibleOriginal = {
+        path: req.path,
+        originalUrl: req.originalUrl,
+        body: clonePlainObject(req.body),
+        endpointKind: detectEndpointKindFromPath(req.path)
+      }
+    }
+
     // 判断是否为 Codex CLI 的请求（基于 User-Agent）
     // 支持: codex_vscode, codex_cli_rs, codex_exec (非交互式/脚本模式)
     const userAgent = req.headers['user-agent'] || ''
@@ -377,6 +397,17 @@ const handleResponses = async (req, res) => {
     const requestedModel = req.body?.model || null
     const schedulerModel = getCodexCompatibleModel(requestedModel)
     const isStream = req.body?.stream !== false // 默认为流式（兼容现有行为）
+    const endpointKind =
+      req._openaiCompatibleOriginal?.endpointKind || detectEndpointKindFromPath(req.path)
+    const featureBody =
+      req._openaiCompatibleOriginal?.endpointKind === 'chat_completions'
+        ? req._openaiCompatibleOriginal.body
+        : req.body
+    const requestFeatures = {
+      ...getRequestFeaturesFromBody(featureBody || {}, endpointKind),
+      endpointKind,
+      openaiResponsesOnly: req._forceOpenAICompatibleRelay === true
+    }
 
     if (schedulerModel !== requestedModel) {
       logger.info(
@@ -388,7 +419,8 @@ const handleResponses = async (req, res) => {
     ;({ accessToken, accountId, accountType, proxy, account } = await getOpenAIAuthToken(
       apiKeyData,
       sessionId,
-      schedulerModel
+      schedulerModel,
+      requestFeatures
     ))
 
     // 如果是 OpenAI-Responses 账户，使用专门的中继服务处理

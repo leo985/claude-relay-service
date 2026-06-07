@@ -1707,12 +1707,120 @@
                   v-model="form.providerEndpoint"
                   class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
                 >
-                  <option value="responses">Responses（推荐）</option>
-                  <option value="auto">自动（保持原始路径）</option>
+                  <option value="responses">Responses API</option>
+                  <option value="chat_completions">Chat Completions API</option>
+                  <option value="passthrough">原样转发</option>
+                  <option value="auto">自动/旧版原样转发（兼容旧配置）</option>
                 </select>
                 <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  指定 Provider 支持的端点类型。Responses 会将所有请求路由到（包括来自
-                  /v1/chat/completions 的请求会自动转换）；自动则保持客户端请求的原始路径
+                  指定上游协议。Chat Completions 会保留原始 messages，Responses 会将
+                  /v1/chat/completions 转为 Responses body，原样转发保留 path/body。
+                </p>
+                <p v-if="errors.providerEndpoint" class="mt-1 text-xs text-red-500">
+                  {{ errors.providerEndpoint }}
+                </p>
+              </div>
+
+              <div>
+                <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                  >上游模型名（可选）</label
+                >
+                <input
+                  v-model="form.boundModel"
+                  class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
+                  placeholder="例如 deepseek-chat；留空则透传客户端 model"
+                  type="text"
+                />
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  填写后 relay 会覆盖上游 body.model，调度也会优先匹配该模型。
+                </p>
+                <p v-if="errors.boundModel" class="mt-1 text-xs text-red-500">
+                  {{ errors.boundModel }}
+                </p>
+              </div>
+
+              <div>
+                <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                  >客户端模型别名（可选，每行一个）</label
+                >
+                <textarea
+                  v-model="form.modelAliasesText"
+                  class="form-input min-h-[88px] w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
+                  placeholder="例如：&#10;deepseek-v3&#10;my-coding-model"
+                />
+                <p v-if="errors.modelAliasesText" class="mt-1 text-xs text-red-500">
+                  {{ errors.modelAliasesText }}
+                </p>
+              </div>
+
+              <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                  <input v-model="form.supportsTools" type="checkbox" />
+                  支持工具调用
+                </label>
+                <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                  <input v-model="form.supportsImages" type="checkbox" />
+                  支持图片输入
+                </label>
+                <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                  <input v-model="form.supportsReasoning" type="checkbox" />
+                  支持 reasoning
+                </label>
+              </div>
+
+              <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                    >输入 token 上限</label
+                  >
+                  <input
+                    v-model.number="form.maxInputTokens"
+                    class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                    min="0"
+                    type="number"
+                  />
+                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    Phase 1 仅记录/展示，不做精确 tokenizer 拦截。
+                  </p>
+                </div>
+                <div>
+                  <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                    >输出 token 上限</label
+                  >
+                  <input
+                    v-model.number="form.maxOutputTokens"
+                    class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                    min="0"
+                    type="number"
+                  />
+                  <div class="mt-2 flex flex-wrap gap-2">
+                    <button
+                      v-for="val in [4096, 8192, 16384]"
+                      :key="val"
+                      class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                      type="button"
+                      @click="form.maxOutputTokens = val"
+                    >
+                      {{ val }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                  >自定义请求头 JSON（可选）</label
+                >
+                <textarea
+                  v-model="form.customHeadersText"
+                  class="form-input min-h-[104px] w-full font-mono text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                  placeholder='{ "X-API-Key": "secret" }'
+                />
+                <p v-if="errors.customHeadersText" class="mt-1 text-xs text-red-500">
+                  {{ errors.customHeadersText }}
+                </p>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  值会加密存储；禁止覆盖 Authorization、Host、Cookie 等保留请求头。
                 </p>
               </div>
 
@@ -3479,13 +3587,124 @@
                 v-model="form.providerEndpoint"
                 class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
               >
-                <option value="responses">Responses（推荐）</option>
-                <option value="completions">Chat Completions</option>
-                <option value="auto">自动（保持原始路径）</option>
+                <option value="responses">Responses API</option>
+                <option value="chat_completions">Chat Completions API</option>
+                <option value="passthrough">原样转发</option>
+                <option value="auto">自动/旧版原样转发（兼容旧配置）</option>
               </select>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                指定 Provider 支持的端点类型。Responses 会将所有请求路由到（包括来自
-                /v1/chat/completions 的请求会自动转换）；自动则保持原始路径
+                指定上游协议。Chat Completions 会保留原始 messages，Responses 会将
+                /v1/chat/completions 转为 Responses body，原样转发保留 path/body。
+              </p>
+              <p v-if="errors.providerEndpoint" class="mt-1 text-xs text-red-500">
+                {{ errors.providerEndpoint }}
+              </p>
+            </div>
+
+            <div>
+              <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                >上游模型名（可选）</label
+              >
+              <input
+                v-model="form.boundModel"
+                class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                placeholder="例如 deepseek-chat；留空则透传客户端 model"
+                type="text"
+              />
+              <p v-if="errors.boundModel" class="mt-1 text-xs text-red-500">
+                {{ errors.boundModel }}
+              </p>
+            </div>
+
+            <div>
+              <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                >客户端模型别名（可选，每行一个）</label
+              >
+              <textarea
+                v-model="form.modelAliasesText"
+                class="form-input min-h-[88px] w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                placeholder="例如：&#10;deepseek-v3&#10;my-coding-model"
+              />
+              <p v-if="errors.modelAliasesText" class="mt-1 text-xs text-red-500">
+                {{ errors.modelAliasesText }}
+              </p>
+            </div>
+
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                <input v-model="form.supportsTools" type="checkbox" />
+                支持工具调用
+              </label>
+              <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                <input v-model="form.supportsImages" type="checkbox" />
+                支持图片输入
+              </label>
+              <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                <input v-model="form.supportsReasoning" type="checkbox" />
+                支持 reasoning
+              </label>
+            </div>
+
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300">
+                  输入 token 上限
+                </label>
+                <input
+                  v-model.number="form.maxInputTokens"
+                  class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                  min="0"
+                  type="number"
+                />
+              </div>
+              <div>
+                <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300">
+                  输出 token 上限
+                </label>
+                <input
+                  v-model.number="form.maxOutputTokens"
+                  class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                  min="0"
+                  type="number"
+                />
+                <div class="mt-2 flex flex-wrap gap-2">
+                  <button
+                    v-for="val in [4096, 8192, 16384]"
+                    :key="val"
+                    class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                    type="button"
+                    @click="form.maxOutputTokens = val"
+                  >
+                    {{ val }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div class="mb-3 flex items-center justify-between gap-3">
+                <label class="block text-sm font-semibold text-gray-700 dark:text-gray-300">
+                  自定义请求头 JSON（可选）
+                </label>
+                <button
+                  v-if="isEdit"
+                  class="text-xs text-red-600 hover:text-red-700"
+                  type="button"
+                  @click="clearCustomHeaders"
+                >
+                  清空自定义请求头
+                </button>
+              </div>
+              <textarea
+                v-model="form.customHeadersText"
+                class="form-input min-h-[104px] w-full font-mono text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                placeholder='{ "X-API-Key": "***" }'
+              />
+              <p v-if="errors.customHeadersText" class="mt-1 text-xs text-red-500">
+                {{ errors.customHeadersText }}
+              </p>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                回显值会脱敏为 ***；保留 *** 表示不更新该 key。
               </p>
             </div>
 
@@ -4306,6 +4525,66 @@ const normalizeAccountCooldownOverride = (value) => {
 
 const toFormBoolean = (value) => value === true || value === 'true'
 
+const OPENAI_RESPONSES_PROVIDER_ENDPOINTS = ['responses', 'chat_completions', 'passthrough', 'auto']
+const RESERVED_OPENAI_CUSTOM_HEADERS = [
+  'authorization',
+  'host',
+  'content-length',
+  'connection',
+  'cookie',
+  'set-cookie',
+  'proxy-authorization'
+]
+const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+
+const formatCustomHeadersForEdit = (headers) => {
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) {
+    return ''
+  }
+  return Object.keys(headers).length > 0 ? JSON.stringify(headers, null, 2) : ''
+}
+
+const parseCustomHeadersText = (text) => {
+  const trimmed = (text || '').trim()
+  if (!trimmed) {
+    return {}
+  }
+
+  let parsed
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch {
+    throw new Error('自定义请求头必须是合法 JSON 对象')
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('自定义请求头必须是 JSON object，不能是数组或字符串')
+  }
+
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!HEADER_NAME_PATTERN.test(key)) {
+      throw new Error(`非法请求头名称：${key}`)
+    }
+    if (RESERVED_OPENAI_CUSTOM_HEADERS.includes(key.toLowerCase())) {
+      throw new Error(`请求头 ${key} 为保留字段，不能在自定义请求头中设置`)
+    }
+    if (!['string', 'number', 'boolean'].includes(typeof value)) {
+      throw new Error(`请求头 ${key} 的值只能是 string、number 或 boolean`)
+    }
+  }
+
+  return parsed
+}
+
+const normalizeModelAliasText = (text) =>
+  (text || '')
+    .split('\n')
+    .map((value) => value.trim())
+    .filter(Boolean)
+
+const normalizeProviderEndpointForForm = (value) =>
+  value === 'completions' ? 'chat_completions' : value || 'responses'
+
 // 表单数据
 const form = ref({
   platform: props.account?.platform || 'claude',
@@ -4343,7 +4622,17 @@ const form = ref({
   endpointType: props.account?.endpointType || 'anthropic',
   // OpenAI-Responses 特定字段
   baseApi: props.account?.baseApi || '',
-  providerEndpoint: props.account?.providerEndpoint || 'responses',
+  providerEndpoint: normalizeProviderEndpointForForm(props.account?.providerEndpoint),
+  boundModel: props.account?.boundModel || '',
+  modelAliasesText: Array.isArray(props.account?.modelAliases)
+    ? props.account.modelAliases.join('\n')
+    : '',
+  supportsTools: props.account?.supportsTools !== false,
+  supportsImages: props.account?.supportsImages || false,
+  supportsReasoning: props.account?.supportsReasoning || false,
+  maxInputTokens: props.account?.maxInputTokens || 0,
+  maxOutputTokens: props.account?.maxOutputTokens || 0,
+  customHeadersText: formatCustomHeadersForEdit(props.account?.customHeaders),
   // Gemini-API 特定字段
   baseUrl: props.account?.baseUrl || 'https://generativelanguage.googleapis.com',
   rateLimitDuration: props.account?.rateLimitDuration || 60,
@@ -4407,6 +4696,97 @@ const form = ref({
   })(),
   expiresAt: props.account?.expiresAt || null
 })
+
+let initialCustomHeadersText = form.value.customHeadersText
+const clearCustomHeadersRequested = ref(false)
+
+const clearCustomHeaders = () => {
+  form.value.customHeadersText = ''
+  clearCustomHeadersRequested.value = true
+}
+
+watch(
+  () => form.value.customHeadersText,
+  (value) => {
+    if ((value || '').trim()) {
+      clearCustomHeadersRequested.value = false
+    }
+  }
+)
+
+const hasControlCharacters = (value) =>
+  Array.from(value || '').some((char) => {
+    const code = char.charCodeAt(0)
+    return code === 127 || code < 32
+  })
+
+const validateOpenAIResponsesFields = ({ requireApiKey = false } = {}) => {
+  let hasError = false
+  errors.value.baseApi = ''
+  errors.value.apiKey = ''
+  errors.value.providerEndpoint = ''
+  errors.value.boundModel = ''
+  errors.value.modelAliasesText = ''
+  errors.value.customHeadersText = ''
+
+  if (!form.value.baseApi || form.value.baseApi.trim() === '') {
+    errors.value.baseApi = '请填写 API 基础地址'
+    hasError = true
+  }
+  if (requireApiKey && (!form.value.apiKey || form.value.apiKey.trim() === '')) {
+    errors.value.apiKey = '请填写 API 密钥'
+    hasError = true
+  }
+  if (!OPENAI_RESPONSES_PROVIDER_ENDPOINTS.includes(form.value.providerEndpoint)) {
+    errors.value.providerEndpoint = 'Provider 端点类型不合法'
+    hasError = true
+  }
+  if (hasControlCharacters(form.value.boundModel)) {
+    errors.value.boundModel = '上游模型名不能包含换行或控制字符'
+    hasError = true
+  }
+  const aliases = normalizeModelAliasText(form.value.modelAliasesText)
+  if (aliases.some((alias) => hasControlCharacters(alias))) {
+    errors.value.modelAliasesText = '模型别名不能包含控制字符'
+    hasError = true
+  }
+
+  try {
+    parseCustomHeadersText(form.value.customHeadersText)
+  } catch (error) {
+    errors.value.customHeadersText = error.message
+    hasError = true
+  }
+
+  return !hasError
+}
+
+const applyOpenAIResponsesPayload = (data, options = {}) => {
+  const { includeApiKey = true, includeCustomHeaders = true } = options
+
+  data.baseApi = form.value.baseApi
+  if (includeApiKey && form.value.apiKey) {
+    data.apiKey = form.value.apiKey
+  }
+  data.userAgent = form.value.userAgent || ''
+  data.providerEndpoint = form.value.providerEndpoint || 'responses'
+  data.boundModel = form.value.boundModel?.trim() || ''
+  data.modelAliases = normalizeModelAliasText(form.value.modelAliasesText)
+  data.supportsTools = !!form.value.supportsTools
+  data.supportsImages = !!form.value.supportsImages
+  data.supportsReasoning = !!form.value.supportsReasoning
+  data.maxInputTokens = Math.max(0, Number(form.value.maxInputTokens) || 0)
+  data.maxOutputTokens = Math.max(0, Number(form.value.maxOutputTokens) || 0)
+  data.priority = form.value.priority || 50
+  data.dailyQuota = form.value.dailyQuota || 0
+  data.quotaResetTime = form.value.quotaResetTime || '00:00'
+
+  if (includeCustomHeaders) {
+    data.customHeaders = parseCustomHeadersText(form.value.customHeadersText)
+  }
+
+  return data
+}
 
 const buildClaudeTempUnavailablePolicyPayload = () => ({
   disableTempUnavailable: !!form.value.disableTempUnavailable,
@@ -4557,7 +4937,11 @@ const errors = ref({
   region: '',
   bearerToken: '',
   azureEndpoint: '',
-  deploymentName: ''
+  deploymentName: '',
+  providerEndpoint: '',
+  boundModel: '',
+  modelAliasesText: '',
+  customHeadersText: ''
 })
 
 // 计算是否可以进入下一步
@@ -5226,6 +5610,11 @@ const createAccount = async () => {
   errors.value.apiUrl = ''
   errors.value.apiKey = ''
   errors.value.apiKeys = ''
+  errors.value.baseApi = ''
+  errors.value.providerEndpoint = ''
+  errors.value.boundModel = ''
+  errors.value.modelAliasesText = ''
+  errors.value.customHeadersText = ''
 
   let hasError = false
 
@@ -5260,12 +5649,7 @@ const createAccount = async () => {
 
   // OpenAI-Responses 验证
   if (form.value.platform === 'openai-responses') {
-    if (!form.value.baseApi || form.value.baseApi.trim() === '') {
-      errors.value.baseApi = '请填写 API 基础地址'
-      hasError = true
-    }
-    if (!form.value.apiKey || form.value.apiKey.trim() === '') {
-      errors.value.apiKey = '请填写 API 密钥'
+    if (!validateOpenAIResponsesFields({ requireApiKey: true })) {
       hasError = true
     }
   } else if (form.value.platform === 'bedrock') {
@@ -5519,14 +5903,8 @@ const createAccount = async () => {
       data.maxConcurrentTasks = form.value.maxConcurrentTasks || 0
     } else if (form.value.platform === 'openai-responses') {
       // OpenAI-Responses 账户特定数据
-      data.baseApi = form.value.baseApi
-      data.apiKey = form.value.apiKey
-      data.userAgent = form.value.userAgent || ''
-      data.providerEndpoint = form.value.providerEndpoint || 'responses'
-      data.priority = form.value.priority || 50
+      applyOpenAIResponsesPayload(data)
       data.rateLimitDuration = 60 // 默认值60，不从用户输入获取
-      data.dailyQuota = form.value.dailyQuota || 0
-      data.quotaResetTime = form.value.quotaResetTime || '00:00'
     } else if (form.value.platform === 'gemini-antigravity') {
       // Antigravity OAuth - set oauthProvider, submission happens below
       data.oauthProvider = 'antigravity'
@@ -5639,6 +6017,11 @@ const updateAccount = async () => {
   errors.value.name = ''
   errors.value.apiKeys = ''
   errors.value.baseUrl = ''
+  errors.value.baseApi = ''
+  errors.value.providerEndpoint = ''
+  errors.value.boundModel = ''
+  errors.value.modelAliasesText = ''
+  errors.value.customHeadersText = ''
 
   // 验证账户名称
   if (!form.value.name || form.value.name.trim() === '') {
@@ -5651,6 +6034,12 @@ const updateAccount = async () => {
     const baseUrl = form.value.baseUrl?.trim() || ''
     if (!baseUrl) {
       errors.value.baseUrl = '请填写 API 基础地址'
+      return
+    }
+  }
+
+  if (form.value.platform === 'openai-responses') {
+    if (!validateOpenAIResponsesFields({ requireApiKey: false })) {
       return
     }
   }
@@ -5869,16 +6258,19 @@ const updateAccount = async () => {
 
     // OpenAI-Responses 特定更新
     if (props.account.platform === 'openai-responses') {
-      data.baseApi = form.value.baseApi
-      if (form.value.apiKey) {
-        data.apiKey = form.value.apiKey
+      applyOpenAIResponsesPayload(data, {
+        includeApiKey: !!form.value.apiKey,
+        includeCustomHeaders: false
+      })
+      if (clearCustomHeadersRequested.value) {
+        data.customHeaders = {}
+      } else if (
+        form.value.customHeadersText !== initialCustomHeadersText &&
+        form.value.customHeadersText.trim() !== ''
+      ) {
+        data.customHeaders = parseCustomHeadersText(form.value.customHeadersText)
       }
-      data.userAgent = form.value.userAgent || ''
-      data.providerEndpoint = form.value.providerEndpoint || 'responses'
-      data.priority = form.value.priority || 50
       // 编辑时不上传 rateLimitDuration，保持原值
-      data.dailyQuota = form.value.dailyQuota || 0
-      data.quotaResetTime = form.value.quotaResetTime || '00:00'
     }
 
     // Bedrock 特定更新
@@ -6497,7 +6889,17 @@ watch(
         deploymentName: newAccount.deploymentName || '',
         // OpenAI-Responses 特定字段
         baseApi: newAccount.baseApi || '',
-        providerEndpoint: newAccount.providerEndpoint || 'responses',
+        providerEndpoint: normalizeProviderEndpointForForm(newAccount.providerEndpoint),
+        boundModel: newAccount.boundModel || '',
+        modelAliasesText: Array.isArray(newAccount.modelAliases)
+          ? newAccount.modelAliases.join('\n')
+          : '',
+        supportsTools: newAccount.supportsTools !== false,
+        supportsImages: newAccount.supportsImages || false,
+        supportsReasoning: newAccount.supportsReasoning || false,
+        maxInputTokens: newAccount.maxInputTokens || 0,
+        maxOutputTokens: newAccount.maxOutputTokens || 0,
+        customHeadersText: formatCustomHeadersForEdit(newAccount.customHeaders),
         // Gemini-API 特定字段
         baseUrl: newAccount.baseUrl || 'https://generativelanguage.googleapis.com',
         // 额度管理字段
@@ -6516,6 +6918,8 @@ watch(
           newAccount.tempUnavailable5xxTtlSeconds
         )
       }
+      initialCustomHeadersText = form.value.customHeadersText
+      clearCustomHeadersRequested.value = false
 
       // 如果是Claude Console账户，加载实时使用情况
       if (newAccount.platform === 'claude-console') {

@@ -13,7 +13,11 @@ const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const webhookNotifier = require('../../utils/webhookNotifier')
 const { formatAccountExpiry, mapExpiryField } = require('./utils')
-const { createOpenAITestPayload, extractErrorMessage } = require('../../utils/testPayloadHelper')
+const {
+  createChatCompletionsTestPayload,
+  createOpenAITestPayload,
+  extractErrorMessage
+} = require('../../utils/testPayloadHelper')
 const { getProxyAgent } = require('../../utils/proxyHelper')
 
 const router = express.Router()
@@ -181,7 +185,7 @@ router.post('/openai-responses-accounts', authenticateAdmin, async (req, res) =>
     res.json({ success: true, data: formattedAccount })
   } catch (error) {
     logger.error('Failed to create OpenAI-Responses account:', error)
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
       error: error.message
     })
@@ -263,7 +267,7 @@ router.put('/openai-responses-accounts/:id', authenticateAdmin, async (req, res)
     res.json({ success: true, ...result })
   } catch (error) {
     logger.error('Failed to update OpenAI-Responses account:', error)
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
       error: error.message
     })
@@ -463,7 +467,9 @@ router.post('/openai-responses-accounts/:accountId/test', authenticateAdmin, asy
 
   try {
     // 获取账户信息（apiKey 已自动解密）
-    const account = await openaiResponsesAccountService.getAccount(accountId)
+    const account = await openaiResponsesAccountService.getAccount(accountId, {
+      includeSecretHeaders: true
+    })
     if (!account) {
       return res.status(404).json({ error: 'Account not found' })
     }
@@ -475,20 +481,21 @@ router.post('/openai-responses-accounts/:accountId/test', authenticateAdmin, asy
     // 构造测试请求（根据 providerEndpoint 和 baseApi 决定端点路径）
     const baseUrl = account.baseApi || 'https://api.openai.com'
     const providerEndpoint = account.providerEndpoint || 'responses'
-    let endpointPath = '/responses'
-    if (providerEndpoint === 'auto') {
-      endpointPath = '/responses' // 测试时默认用 responses
-    }
+    let endpointPath = providerEndpoint === 'chat_completions' ? '/chat/completions' : '/responses'
     // 防止 baseApi 已含 /v1 时路径重复
     if (!baseUrl.endsWith('/v1')) {
       endpointPath = `/v1${endpointPath}`
     }
     const apiUrl = `${baseUrl}${endpointPath}`
-    const payload = createOpenAITestPayload(model, { stream: false })
+    const payload =
+      providerEndpoint === 'chat_completions'
+        ? createChatCompletionsTestPayload(model, { maxTokens: 100 })
+        : createOpenAITestPayload(model, { stream: false })
 
     const requestConfig = {
       headers: {
         'Content-Type': 'application/json',
+        ...(account.customHeaders || {}),
         Authorization: `Bearer ${account.apiKey}`
       },
       timeout: 30000
@@ -508,8 +515,13 @@ router.post('/openai-responses-accounts/:accountId/test', authenticateAdmin, asy
 
     // 提取响应文本（Responses API 格式）
     let responseText = ''
+    if (Array.isArray(response.data?.choices)) {
+      responseText = response.data.choices
+        .map((choice) => choice.message?.content || choice.text || '')
+        .join('')
+    }
     const output = response.data?.output
-    if (Array.isArray(output)) {
+    if (!responseText && Array.isArray(output)) {
       for (const item of output) {
         if (item.type === 'message' && Array.isArray(item.content)) {
           for (const block of item.content) {

@@ -5,6 +5,7 @@ const { filterForOpenAI } = require('../../utils/headerFilter')
 const openaiResponsesAccountService = require('../account/openaiResponsesAccountService')
 const apiKeyService = require('../apiKeyService')
 const unifiedOpenAIScheduler = require('../scheduler/unifiedOpenAIScheduler')
+const CodexToOpenAIConverter = require('../codexToOpenAI')
 const config = require('../../../config/config')
 const crypto = require('crypto')
 const LRUCache = require('../../utils/lruCache')
@@ -13,6 +14,15 @@ const {
   createRequestDetailMeta,
   extractOpenAICacheReadTokens
 } = require('../../utils/requestDetailHelper')
+const {
+  RESERVED_CUSTOM_HEADERS,
+  clonePlainObject,
+  createOpenAICompatibleError,
+  detectEndpointKindFromPath,
+  getProviderProtocol,
+  getRequestFeaturesFromBody,
+  normalizeProviderEndpoint
+} = require('../../utils/openaiCompatible')
 
 // lastUsedAt 更新节流（每账户 60 秒内最多更新一次，使用 LRU 防止内存泄漏）
 const lastUsedAtThrottle = new LRUCache(1000) // 最多缓存 1000 个账户
@@ -64,6 +74,177 @@ class OpenAIResponsesRelayService {
     })
   }
 
+  resolveUpstreamRequest(req, fullAccount) {
+    const original = req._openaiCompatibleOriginal || null
+    const providerEndpoint = normalizeProviderEndpoint(fullAccount.providerEndpoint || 'responses')
+    const protocol = getProviderProtocol(providerEndpoint)
+    const endpointKind =
+      original?.endpointKind || detectEndpointKindFromPath(req.path || req.url || '')
+    const originalBody = original?.body ? clonePlainObject(original.body) : null
+
+    let targetPath = req.path
+    let body = clonePlainObject(req.body || {})
+
+    if (protocol === 'responses') {
+      targetPath = this._normalizeResponsesPath(endpointKind, original?.path || req.path)
+      body = clonePlainObject(req.body || {})
+    } else if (protocol === 'chat_completions') {
+      if (endpointKind === 'responses') {
+        throw createOpenAICompatibleError(
+          'providerEndpoint=chat_completions does not support Responses API requests in Phase 1'
+        )
+      }
+      targetPath = this._normalizeChatCompletionsPath(original?.path || req.path)
+      body = originalBody || clonePlainObject(req.body || {})
+    } else {
+      targetPath = original?.path || req.path
+      body = originalBody || clonePlainObject(req.body || {})
+    }
+
+    const requestedModel = originalBody?.model || req.body?.model || null
+    const upstreamModel = fullAccount.boundModel?.trim() || body?.model || requestedModel
+    if (fullAccount.boundModel?.trim() && body && typeof body === 'object') {
+      body.model = fullAccount.boundModel.trim()
+    }
+
+    this._validateAndAdjustRequestBody(
+      body,
+      fullAccount,
+      protocol === 'passthrough' ? endpointKind : protocol
+    )
+
+    req._openaiCompatible = {
+      requestedModel,
+      upstreamModel: body?.model || upstreamModel,
+      modelOverridden: !!(
+        fullAccount.boundModel?.trim() && fullAccount.boundModel.trim() !== requestedModel
+      ),
+      providerEndpoint,
+      endpointKind
+    }
+
+    return {
+      targetPath,
+      body,
+      endpointKind,
+      requestedModel,
+      upstreamModel: body?.model || upstreamModel,
+      providerEndpoint,
+      responseAdapter:
+        endpointKind === 'chat_completions' && protocol === 'responses' ? 'responses_to_chat' : null
+    }
+  }
+
+  _normalizeResponsesPath(endpointKind, originalPath = '/v1/responses') {
+    if (endpointKind === 'chat_completions') {
+      return originalPath && originalPath.startsWith('/v1/') ? '/v1/responses' : '/responses'
+    }
+    if (originalPath === '/responses' || originalPath === '/v1/responses') {
+      return originalPath
+    }
+    return '/v1/responses'
+  }
+
+  _normalizeChatCompletionsPath(originalPath = '/v1/chat/completions') {
+    if (originalPath === '/chat/completions' || originalPath === '/v1/chat/completions') {
+      return originalPath
+    }
+    return '/v1/chat/completions'
+  }
+
+  _buildTargetUrl(baseApi, targetPath) {
+    const normalizedBaseApi = (baseApi || '').replace(/\/+$/, '')
+    const normalizedTargetPath = this._stripDuplicatedVersionPath(normalizedBaseApi, targetPath)
+    return `${normalizedBaseApi}${normalizedTargetPath}`
+  }
+
+  _stripDuplicatedVersionPath(baseApi, targetPath) {
+    const safePath = targetPath || ''
+    const normalizedTargetPath = safePath.startsWith('/') ? safePath : `/${safePath}`
+
+    if (/\/v\d+$/i.test(baseApi) && /^\/v\d+\//i.test(normalizedTargetPath)) {
+      return normalizedTargetPath.replace(/^\/v\d+/i, '')
+    }
+
+    return normalizedTargetPath
+  }
+
+  _validateAndAdjustRequestBody(body, account, bodyKind) {
+    const endpointKind = bodyKind === 'chat_completions' ? 'chat_completions' : 'responses'
+    const features = getRequestFeaturesFromBody(body || {}, endpointKind)
+
+    if (features.hasTools && account.supportsTools === false) {
+      throw createOpenAICompatibleError('This OpenAI-compatible account does not support tools')
+    }
+    if (features.hasImages && account.supportsImages !== true) {
+      throw createOpenAICompatibleError(
+        'This OpenAI-compatible account does not support image input'
+      )
+    }
+    if (features.hasReasoning && account.supportsReasoning !== true) {
+      throw createOpenAICompatibleError(
+        'This OpenAI-compatible account does not support reasoning fields'
+      )
+    }
+
+    const maxOutputTokens = parseInt(account.maxOutputTokens, 10) || 0
+    if (maxOutputTokens <= 0 || !body || typeof body !== 'object') {
+      return
+    }
+
+    if (endpointKind === 'chat_completions') {
+      this._clampBodyTokenField(body, 'max_tokens', maxOutputTokens)
+      this._clampBodyTokenField(body, 'max_output_tokens', maxOutputTokens)
+    } else {
+      this._clampBodyTokenField(body, 'max_output_tokens', maxOutputTokens)
+    }
+  }
+
+  _clampBodyTokenField(body, field, limit) {
+    if (body[field] === undefined || body[field] === null || body[field] === '') {
+      return
+    }
+    const parsed = Number(body[field])
+    if (!Number.isFinite(parsed)) {
+      return
+    }
+    body[field] = Math.max(0, Math.min(Math.floor(parsed), limit))
+  }
+
+  _buildUpstreamHeaders(req, fullAccount) {
+    const headers = {
+      ...filterForOpenAI(req.headers),
+      Authorization: `Bearer ${fullAccount.apiKey}`,
+      'Content-Type': 'application/json'
+    }
+
+    if (fullAccount.userAgent) {
+      headers['User-Agent'] = fullAccount.userAgent
+      logger.debug(`📱 Using custom User-Agent: ${fullAccount.userAgent}`)
+    } else if (req.headers['user-agent']) {
+      headers['User-Agent'] = req.headers['user-agent']
+      logger.debug(`📱 Forwarding original User-Agent: ${req.headers['user-agent']}`)
+    }
+
+    const extraHeaders = fullAccount.customHeaders || {}
+    for (const [key, value] of Object.entries(extraHeaders)) {
+      if (RESERVED_CUSTOM_HEADERS.has(key.toLowerCase())) {
+        logger.warn('Skipping reserved custom header', { key })
+        continue
+      }
+      headers[key] = value
+    }
+
+    if (Object.keys(extraHeaders).length > 0) {
+      logger.info('📨 Applied OpenAI-compatible custom headers', {
+        accountId: fullAccount.id,
+        headerKeys: Object.keys(extraHeaders)
+      })
+    }
+
+    return headers
+  }
+
   // 处理请求转发
   async handleRequest(req, res, account, apiKeyData) {
     let abortController = null
@@ -75,7 +256,9 @@ class OpenAIResponsesRelayService {
 
     try {
       // 获取完整的账户信息（包含解密的 API Key）
-      const fullAccount = await openaiResponsesAccountService.getAccount(account.id)
+      const fullAccount = await openaiResponsesAccountService.getAccount(account.id, {
+        includeSecretHeaders: true
+      })
       if (!fullAccount) {
         throw new Error('Account not found')
       }
@@ -95,58 +278,23 @@ class OpenAIResponsesRelayService {
       req.once('close', handleClientDisconnect)
       res.once('close', handleClientDisconnect)
 
-      // 构建目标 URL（根据 providerEndpoint 配置决定端点路径）
-      const providerEndpoint = fullAccount.providerEndpoint || 'responses'
-      let targetPath = req.path
-
-      // 根据 providerEndpoint 配置归一化路径
-      // 注意：unified.js 已将 /v1/chat/completions 的请求体转换为 Responses 格式，
-      // 因此这里只需归一化路径即可；反向 responses→completions 需要同时转换请求体，
-      // 目前不支持，所以只保留 responses 和 auto 两种模式
-      if (
-        providerEndpoint === 'responses' &&
-        (targetPath === '/v1/chat/completions' || targetPath === '/chat/completions')
-      ) {
-        const newPath = targetPath.startsWith('/v1') ? '/v1/responses' : '/responses'
-        logger.info(`📝 Normalized path (${req.path}) → ${newPath} (providerEndpoint=responses)`)
-        targetPath = newPath
-      }
-      // providerEndpoint === 'auto' 时保持原始路径不变
-
-      // 防止 baseApi 已含 /v1 时路径重复（如 baseApi=http://host/v1 + targetPath=/v1/responses → /v1/v1/responses）
-      const baseApi = fullAccount.baseApi || ''
-      if (baseApi.endsWith('/v1') && targetPath.startsWith('/v1/')) {
-        targetPath = targetPath.slice(3) // '/v1/responses' → '/responses'
-      }
-      const targetUrl = `${baseApi}${targetPath}`
+      const upstreamRequest = this.resolveUpstreamRequest(req, fullAccount)
+      req._openaiCompatibleUpstreamBody = upstreamRequest.body
+      req._openaiCompatibleResponseAdapter = upstreamRequest.responseAdapter
+      const targetUrl = this._buildTargetUrl(fullAccount.baseApi, upstreamRequest.targetPath)
       logger.info(`🎯 Forwarding to: ${targetUrl}`)
 
-      // 构建请求头 - 使用统一的 headerFilter 移除 CDN headers
-      const headers = {
-        ...filterForOpenAI(req.headers),
-        Authorization: `Bearer ${fullAccount.apiKey}`,
-        'Content-Type': 'application/json'
-      }
-
-      // 处理 User-Agent
-      if (fullAccount.userAgent) {
-        // 使用自定义 User-Agent
-        headers['User-Agent'] = fullAccount.userAgent
-        logger.debug(`📱 Using custom User-Agent: ${fullAccount.userAgent}`)
-      } else if (req.headers['user-agent']) {
-        // 透传原始 User-Agent
-        headers['User-Agent'] = req.headers['user-agent']
-        logger.debug(`📱 Forwarding original User-Agent: ${req.headers['user-agent']}`)
-      }
+      const headers = this._buildUpstreamHeaders(req, fullAccount)
+      const isStream = upstreamRequest.body?.stream === true
 
       // 配置请求选项
       const requestOptions = {
         method: req.method,
         url: targetUrl,
         headers,
-        data: req.body,
+        data: upstreamRequest.body,
         timeout: this.defaultTimeout,
-        responseType: req.body?.stream ? 'stream' : 'json',
+        responseType: isStream ? 'stream' : 'json',
         validateStatus: () => true, // 允许处理所有状态码
         signal: abortController.signal
       }
@@ -170,9 +318,13 @@ class OpenAIResponsesRelayService {
         accountName: account.name,
         targetUrl,
         method: req.method,
-        stream: req.body?.stream || false,
-        model: req.body?.model || 'unknown',
-        userAgent: headers['User-Agent'] || 'not set'
+        stream: isStream,
+        model: upstreamRequest.upstreamModel || 'unknown',
+        requestedModel: upstreamRequest.requestedModel || 'unknown',
+        providerEndpoint: upstreamRequest.providerEndpoint,
+        endpointKind: upstreamRequest.endpointKind,
+        userAgent: headers['User-Agent'] || 'not set',
+        customHeaderKeys: Object.keys(fullAccount.customHeaders || {})
       })
 
       // 发送请求
@@ -183,7 +335,7 @@ class OpenAIResponsesRelayService {
         const { resetsInSeconds, errorData } = await this._handle429Error(
           account,
           response,
-          req.body?.stream,
+          isStream,
           sessionHash
         )
 
@@ -340,20 +492,31 @@ class OpenAIResponsesRelayService {
       await this._throttledUpdateLastUsedAt(account.id)
 
       // 处理流式响应
-      if (req.body?.stream && response.data && typeof response.data.pipe === 'function') {
+      if (isStream && response.data && typeof response.data.pipe === 'function') {
         return this._handleStreamResponse(
           response,
           res,
           account,
           apiKeyData,
-          req.body?.model,
+          upstreamRequest.responseAdapter
+            ? upstreamRequest.requestedModel
+            : upstreamRequest.upstreamModel || upstreamRequest.requestedModel,
           handleClientDisconnect,
           req
         )
       }
 
       // 处理非流式响应
-      return this._handleNormalResponse(response, res, account, apiKeyData, req.body?.model, req)
+      return this._handleNormalResponse(
+        response,
+        res,
+        account,
+        apiKeyData,
+        upstreamRequest.responseAdapter
+          ? upstreamRequest.requestedModel
+          : upstreamRequest.upstreamModel || upstreamRequest.requestedModel,
+        req
+      )
     } catch (error) {
       // 清理 AbortController
       if (abortController && !abortController.signal.aborted) {
@@ -385,6 +548,16 @@ class OpenAIResponsesRelayService {
       // 如果已经发送了响应头，直接结束
       if (res.headersSent) {
         return res.end()
+      }
+
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({
+          error: {
+            message: error.message,
+            type: error.code || 'invalid_request_error',
+            code: error.code || 'invalid_request'
+          }
+        })
       }
 
       // 检查是否是axios错误并包含响应
@@ -494,6 +667,9 @@ class OpenAIResponsesRelayService {
     let rateLimitDetected = false
     let rateLimitResetsInSeconds = null
     let streamEnded = false
+    const shouldAdaptResponsesToChat = req._openaiCompatibleResponseAdapter === 'responses_to_chat'
+    const chatConverter = shouldAdaptResponsesToChat ? new CodexToOpenAIConverter() : null
+    const chatStreamState = chatConverter?.createStreamState()
 
     // 解析 SSE 事件以捕获 usage 数据和 model
     const parseSSEForUsage = (data) => {
@@ -552,13 +728,44 @@ class OpenAIResponsesRelayService {
       }
     }
 
+    const adaptSSEToChat = (data) => {
+      if (!chatConverter) {
+        return
+      }
+      const lines = data.split('\n')
+      for (const line of lines) {
+        if (!line.startsWith('data:')) {
+          continue
+        }
+        const jsonStr = line.slice(5).trim()
+        if (!jsonStr || jsonStr === '[DONE]') {
+          continue
+        }
+        try {
+          const eventData = JSON.parse(jsonStr)
+          const converted = chatConverter.convertStreamChunk(
+            eventData,
+            requestedModel,
+            chatStreamState
+          )
+          for (const chunk of converted) {
+            if (!res.destroyed && !streamEnded) {
+              res.write(chunk)
+            }
+          }
+        } catch {
+          // Ignore malformed upstream SSE events while preserving the stream.
+        }
+      }
+    }
+
     // 监听数据流
     response.data.on('data', (chunk) => {
       try {
         const chunkStr = chunk.toString()
 
-        // 转发数据给客户端
-        if (!res.destroyed && !streamEnded) {
+        // 转发数据给客户端。Responses -> Chat 场景在完整 SSE 事件处转换后再输出。
+        if (!shouldAdaptResponsesToChat && !res.destroyed && !streamEnded) {
           res.write(chunk)
         }
 
@@ -573,6 +780,9 @@ class OpenAIResponsesRelayService {
           for (const event of events) {
             if (event.trim()) {
               parseSSEForUsage(event)
+              if (shouldAdaptResponsesToChat) {
+                adaptSSEToChat(event)
+              }
             }
           }
         }
@@ -582,11 +792,12 @@ class OpenAIResponsesRelayService {
     })
 
     response.data.on('end', async () => {
-      streamEnded = true
-
       // 处理剩余的 buffer
       if (buffer.trim()) {
         parseSSEForUsage(buffer)
+        if (shouldAdaptResponsesToChat) {
+          adaptSSEToChat(buffer)
+        }
       }
 
       // 记录使用统计
@@ -618,7 +829,7 @@ class OpenAIResponsesRelayService {
             'openai-responses',
             serviceTier,
             createRequestDetailMeta(req, {
-              requestBody: req.body,
+              requestBody: req._openaiCompatibleUpstreamBody || req.body,
               stream: true,
               statusCode: res.statusCode
             })
@@ -676,7 +887,11 @@ class OpenAIResponsesRelayService {
       req.removeListener('close', handleClientDisconnect)
       res.removeListener('close', handleClientDisconnect)
 
+      streamEnded = true
       if (!res.destroyed) {
+        if (shouldAdaptResponsesToChat) {
+          res.write('data: [DONE]\n\n')
+        }
         res.end()
       }
 
@@ -720,6 +935,7 @@ class OpenAIResponsesRelayService {
   // 处理非流式响应
   async _handleNormalResponse(response, res, account, apiKeyData, requestedModel, req) {
     const responseData = response.data
+    let clientResponseData = responseData
 
     // 提取 usage 数据和实际 model
     // 支持两种格式：直接的 usage 或嵌套在 response 中的 usage
@@ -755,7 +971,7 @@ class OpenAIResponsesRelayService {
           'openai-responses',
           serviceTier,
           createRequestDetailMeta(req, {
-            requestBody: req?.body,
+            requestBody: req?._openaiCompatibleUpstreamBody || req?.body,
             stream: false,
             statusCode: response.status
           })
@@ -789,8 +1005,17 @@ class OpenAIResponsesRelayService {
       }
     }
 
+    if (req._openaiCompatibleResponseAdapter === 'responses_to_chat') {
+      try {
+        const converter = new CodexToOpenAIConverter()
+        clientResponseData = converter.convertResponse(responseData, requestedModel)
+      } catch (error) {
+        logger.warn('Failed to convert Responses payload to Chat Completions format:', error)
+      }
+    }
+
     // 返回响应
-    res.status(response.status).json(responseData)
+    res.status(response.status).json(clientResponseData)
 
     logger.info('Normal response completed', {
       accountId: account.id,
