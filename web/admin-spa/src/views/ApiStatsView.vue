@@ -18,7 +18,7 @@
                 ? '额度卡'
                 : '使用教程'
           "
-          :title="oemSettings.siteName"
+          :title="API_STATS_BRAND_NAME"
         />
         <div class="flex items-center gap-2 md:gap-4">
           <!-- 主题切换按钮 -->
@@ -28,7 +28,7 @@
 
           <!-- 分隔线 -->
           <div
-            v-if="oemSettings.ldapEnabled || oemSettings.showAdminButton !== false"
+            v-if="oemSettings.ldapEnabled"
             class="h-8 w-px bg-gradient-to-b from-transparent via-gray-300 to-transparent opacity-50 dark:via-gray-600"
           />
 
@@ -40,15 +40,6 @@
           >
             <i class="fas fa-user text-sm md:text-base" />
             <span class="text-xs font-semibold tracking-wide md:text-sm">用户登录</span>
-          </router-link>
-          <!-- 管理后台按钮 -->
-          <router-link
-            v-if="oemSettings.showAdminButton !== false"
-            class="admin-button-refined flex items-center gap-2 rounded-2xl px-4 py-2 transition-all duration-300 md:px-5 md:py-2.5"
-            to="/dashboard"
-          >
-            <i class="fas fa-shield-alt text-sm md:text-base" />
-            <span class="text-xs font-semibold tracking-wide md:text-sm">管理后台</span>
           </router-link>
         </div>
       </div>
@@ -545,6 +536,8 @@ import ServiceCostCards from '@/components/apistats/ServiceCostCards.vue'
 import TutorialView from './TutorialView.vue'
 import UnifiedTestModal from '@/components/common/UnifiedTestModal.vue'
 
+const API_STATS_BRAND_NAME = '一站式AI网关'
+
 const route = useRoute()
 const apiStatsStore = useApiStatsStore()
 const themeStore = useThemeStore()
@@ -776,6 +769,7 @@ const handleKeyDown = (event) => {
 // 初始化
 onMounted(async () => {
   // API Stats Page loaded
+  document.title = API_STATS_BRAND_NAME
 
   // 初始化主题（因为该页面不在 MainLayout 内）
   themeStore.initTheme()

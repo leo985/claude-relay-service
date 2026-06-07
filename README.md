@@ -487,6 +487,54 @@ GEMINI_MODEL="gemini-2.5-pro" # 如果你有gemini3权限可以填： gemini-3-p
 
 > 💡 **进阶用法**：想在 Claude Code 中直接使用 Gemini 3 模型？请参考 [Claude Code 调用 Gemini 3 模型指南](docs/claude-code-gemini3-guide/README.md)
 
+**WorkBuddy (Factory Droid) 配置：**
+
+WorkBuddy (Droid) 是 Factory 开发的 AI 软件工程代理，支持多种 API 端点：
+
+```bash
+export DROID_BASE_URL="http://127.0.0.1:3000/droid"  # 根据实际填写你服务器的ip地址或者域名
+export DROID_API_KEY="后台创建的API密钥"
+```
+
+> **注意**：创建 API Key 时必须**启用 Droid 权限**。
+
+**第一步：添加 Droid 账户**
+
+1. 登录 CRS 管理后台
+2. 进入 **「Droid 账户」** 页面
+3. 点击 **「添加账户」**，选择认证方式：
+   - **OAuth（推荐）**：点击"生成授权链接"，完成 Factory/Droid 账户登录和授权
+   - **API Key**：直接输入 Factory.ai API Key，支持多 Key 轮换
+4. 可选配置代理
+5. 保存
+
+**第二步：创建带 Droid 权限的 API Key**
+
+1. 进入 **「API Keys」** 页面
+2. 点击 **「新建 Key」**
+3. 在权限部分，**勾选「Droid」** 权限
+4. 保存并复制生成的密钥
+
+**第三步：开始使用 WorkBuddy**
+
+```bash
+droid  # 或你的 WorkBuddy CLI 命令
+```
+
+**支持的端点：**
+
+| 端点 | 路径 | 协议 | 说明 |
+|------|------|------|------|
+| Claude (Anthropic) | `/droid/claude/v1/messages` | Anthropic Messages API | Claude 模型 (Opus/Sonnet) |
+| OpenAI Responses | `/droid/openai/v1/responses` | OpenAI Responses API | GPT-5 及兼容模型 |
+| Chat Completions | `/droid/comm/v1/chat/completions` | OpenAI Chat Completions | 通用 OpenAI 兼容 |
+
+**模型映射：**
+
+服务会自动映射部分模型名称以保证兼容性：
+- `claude-haiku-*` → `claude-sonnet-4-20250514`（Anthropic 端点）
+- `gpt-5` → `gpt-5-2025-08-07`（OpenAI 端点）
+
 **使用 Claude Code：**
 
 ```bash

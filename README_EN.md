@@ -312,6 +312,54 @@ GEMINI_API_KEY="API key created in the backend"
 GEMINI_MODEL="gemini-2.5-pro"
 ```
 
+**WorkBuddy (Factory Droid) Set Environment Variables:**
+
+WorkBuddy (Droid) is an AI software engineering agent built by Factory, supporting multiple API endpoints:
+
+```bash
+export DROID_BASE_URL="http://127.0.0.1:3000/droid"  # Fill in your server's IP address or domain
+export DROID_API_KEY="API key created in the backend"
+```
+
+> **Note**: The API Key must have **Droid permission** enabled when creating it.
+
+**Step 1: Add a Droid Account**
+
+1. Login to CRS admin panel
+2. Navigate to **"Droid Accounts"** tab
+3. Click **"Add Account"**, select authentication method:
+   - **OAuth (Recommended)**: Click "Generate Authorization Link", complete Factory/Droid account login and authorization
+   - **API Key**: Directly enter Factory.ai API Key(s), supports multi-key rotation
+4. Configure optional proxy if needed
+5. Save
+
+**Step 2: Create API Key with Droid Permission**
+
+1. Navigate to **"API Keys"** tab
+2. Click **"Create New Key"**
+3. In permissions section, **enable "Droid"** permission
+4. Save and copy the generated key
+
+**Step 3: Start Using WorkBuddy**
+
+```bash
+droid  # or your WorkBuddy CLI command
+```
+
+**Supported Endpoints:**
+
+| Endpoint | Path | Protocol | Description |
+|----------|------|----------|-------------|
+| Claude (Anthropic) | `/droid/claude/v1/messages` | Anthropic Messages API | Claude models (Opus/Sonnet) |
+| OpenAI Responses | `/droid/openai/v1/responses` | OpenAI Responses API | GPT-5 and compatible models |
+| Chat Completions | `/droid/comm/v1/chat/completions` | OpenAI Chat Completions | General OpenAI-compatible |
+
+**Model Mapping:**
+
+The service automatically maps certain model names for compatibility:
+- `claude-haiku-*` → `claude-sonnet-4-20250514` (Anthropic endpoint)
+- `gpt-5` → `gpt-5-2025-08-07` (OpenAI endpoint)
+
 **Use Claude Code:**
 
 ```bash
