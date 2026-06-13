@@ -14,6 +14,7 @@ const {
   createRequestDetailMeta,
   extractOpenAICacheReadTokens
 } = require('../../utils/requestDetailHelper')
+const { updateRateLimitCounters } = require('../../utils/rateLimitHelper')
 const {
   RESERVED_CUSTOM_HEADERS,
   clonePlainObject,
@@ -52,6 +53,42 @@ function extractCacheCreationTokens(usageData) {
   }
 
   return 0
+}
+
+function toFiniteNumber(value, fallback = 0) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function summarizeUsage(usageData = {}) {
+  const totalInputTokens = toFiniteNumber(usageData.input_tokens ?? usageData.prompt_tokens)
+  const outputTokens = toFiniteNumber(usageData.output_tokens ?? usageData.completion_tokens)
+  const cacheReadTokens = extractOpenAICacheReadTokens(usageData)
+  const cacheCreateTokens = extractCacheCreationTokens(usageData)
+  const actualInputTokens = Math.max(0, totalInputTokens - cacheReadTokens)
+  const totalTokens =
+    toFiniteNumber(usageData.total_tokens) ||
+    totalInputTokens + outputTokens + cacheCreateTokens
+
+  return {
+    totalInputTokens,
+    inputTokens: actualInputTokens,
+    outputTokens,
+    cacheCreateTokens,
+    cacheReadTokens,
+    totalTokens
+  }
+}
+
+function emptyUsageSummary() {
+  return {
+    totalInputTokens: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreateTokens: 0,
+    cacheReadTokens: 0,
+    totalTokens: 0
+  }
 }
 
 class OpenAIResponsesRelayService {
@@ -200,6 +237,119 @@ class OpenAIResponsesRelayService {
     }
   }
 
+  _ensureChatCompletionsStreamUsage(body, providerEndpoint) {
+    if (!body || typeof body !== 'object' || body.stream !== true) {
+      return
+    }
+
+    if (normalizeProviderEndpoint(providerEndpoint || 'responses') !== 'chat_completions') {
+      return
+    }
+
+    const existingOptions =
+      body.stream_options &&
+      typeof body.stream_options === 'object' &&
+      !Array.isArray(body.stream_options)
+        ? body.stream_options
+        : {}
+
+    body.stream_options = {
+      ...existingOptions,
+      include_usage: true
+    }
+  }
+
+  async _applyRateLimitTracking(req, usageSummary, model, costs, context) {
+    if (!req?.rateLimitInfo) {
+      return
+    }
+
+    try {
+      const { totalTokens, ratedCost } = await updateRateLimitCounters(
+        req.rateLimitInfo,
+        usageSummary,
+        model,
+        req.apiKey?.id,
+        'openai-responses',
+        costs
+      )
+
+      if (totalTokens > 0) {
+        logger.api(
+          `📊 Updated OpenAI-compatible rate limit token count (${context}): +${totalTokens}`
+        )
+      }
+      if (typeof ratedCost === 'number' && ratedCost > 0) {
+        logger.api(
+          `💰 Updated OpenAI-compatible rate limit cost count (${context}): +$${ratedCost.toFixed(6)}`
+        )
+      }
+    } catch (error) {
+      logger.error(
+        `❌ Failed to update OpenAI-compatible rate limit counters (${context}):`,
+        error
+      )
+    }
+  }
+
+  async _recordSuccessfulUsage({
+    req,
+    res,
+    account,
+    apiKeyData,
+    requestedModel,
+    actualModel,
+    usageData = null,
+    stream = false,
+    statusCode = 200,
+    context = 'openai-compatible',
+    fallbackReason = ''
+  }) {
+    const modelToRecord = actualModel || requestedModel || 'gpt-4'
+    const usageSummary = usageData ? summarizeUsage(usageData) : emptyUsageSummary()
+    const serviceTier = req?._serviceTier || null
+
+    const costs =
+      (await apiKeyService.recordUsage(
+        apiKeyData.id,
+        usageSummary.inputTokens,
+        usageSummary.outputTokens,
+        usageSummary.cacheCreateTokens,
+        usageSummary.cacheReadTokens,
+        modelToRecord,
+        account.id,
+        'openai-responses',
+        serviceTier,
+        createRequestDetailMeta(req, {
+          requestBody: req?._openaiCompatibleUpstreamBody || req?.body,
+          stream,
+          statusCode
+        })
+      )) || { realCost: 0, ratedCost: 0 }
+
+    if (usageData) {
+      await this._applyRateLimitTracking(req, usageSummary, modelToRecord, costs, context)
+    } else if (fallbackReason) {
+      logger.warn(
+        `📊 Recorded OpenAI-compatible successful request without usage (${fallbackReason}) - ` +
+          `Model: ${modelToRecord}`
+      )
+    }
+
+    await openaiResponsesAccountService.updateAccountUsage(account.id, usageSummary.totalTokens)
+
+    const dailyQuota = parseFloat(account.dailyQuota) || 0
+    if (usageData && dailyQuota > 0 && costs.realCost > 0) {
+      await openaiResponsesAccountService.updateUsageQuota(account.id, costs.realCost)
+    }
+
+    return {
+      modelToRecord,
+      usageSummary,
+      costs
+    }
+  }
+
   _clampBodyTokenField(body, field, limit) {
     if (body[field] === undefined || body[field] === null || body[field] === '') {
       return
@@ -279,6 +429,7 @@ class OpenAIResponsesRelayService {
       res.once('close', handleClientDisconnect)
 
       const upstreamRequest = this.resolveUpstreamRequest(req, fullAccount)
+      this._ensureChatCompletionsStreamUsage(upstreamRequest.body, upstreamRequest.providerEndpoint)
       req._openaiCompatibleUpstreamBody = upstreamRequest.body
       req._openaiCompatibleResponseAdapter = upstreamRequest.responseAdapter
       const targetUrl = this._buildTargetUrl(fullAccount.baseApi, upstreamRequest.targetPath)
@@ -685,6 +836,20 @@ class OpenAIResponsesRelayService {
 
             const eventData = JSON.parse(jsonStr)
 
+            // Chat Completions stream usage is emitted as a top-level usage object
+            // when stream_options.include_usage is enabled.
+            if (eventData.model) {
+              actualModel = eventData.model
+            }
+            if (eventData.usage) {
+              usageData = eventData.usage
+              logger.info('📊 Successfully captured usage data from Chat Completions stream:', {
+                prompt_tokens: usageData.prompt_tokens,
+                completion_tokens: usageData.completion_tokens,
+                total_tokens: usageData.total_tokens
+              })
+            }
+
             // 检查是否是 response.completed 事件（OpenAI-Responses 格式）
             if (eventData.type === 'response.completed' && eventData.response) {
               // 从响应中获取真实的 model
@@ -800,64 +965,27 @@ class OpenAIResponsesRelayService {
         }
       }
 
-      // 记录使用统计
-      if (usageData) {
+      // 先记录真实 usage；如果没有 usage 且不是限流错误，再补记 0-token 成功请求。
+      if (usageData || !rateLimitDetected) {
         try {
-          // OpenAI-Responses 使用 input_tokens/output_tokens，标准 OpenAI 使用 prompt_tokens/completion_tokens
-          const totalInputTokens = usageData.input_tokens || usageData.prompt_tokens || 0
-          const outputTokens = usageData.output_tokens || usageData.completion_tokens || 0
+          const result = await this._recordSuccessfulUsage({
+            req,
+            res,
+            account,
+            apiKeyData,
+            requestedModel,
+            actualModel,
+            usageData,
+            stream: true,
+            statusCode: res.statusCode,
+            context: 'openai-compatible-stream',
+            fallbackReason: usageData ? '' : 'stream completed without usage'
+          })
 
-          // 提取缓存相关的 tokens（如果存在）
-          const cacheReadTokens = extractOpenAICacheReadTokens(usageData)
-          const cacheCreateTokens = extractCacheCreationTokens(usageData)
-          // 计算实际输入token（总输入减去缓存部分）
-          const actualInputTokens = Math.max(0, totalInputTokens - cacheReadTokens)
-
-          const totalTokens =
-            usageData.total_tokens || totalInputTokens + outputTokens + cacheCreateTokens
-          const modelToRecord = actualModel || requestedModel || 'gpt-4'
-
-          const serviceTier = req._serviceTier || null
-          await apiKeyService.recordUsage(
-            apiKeyData.id,
-            actualInputTokens, // 传递实际输入（不含缓存）
-            outputTokens,
-            cacheCreateTokens,
-            cacheReadTokens,
-            modelToRecord,
-            account.id,
-            'openai-responses',
-            serviceTier,
-            createRequestDetailMeta(req, {
-              requestBody: req._openaiCompatibleUpstreamBody || req.body,
-              stream: true,
-              statusCode: res.statusCode
-            })
-          )
-
+          const { usageSummary, modelToRecord } = result
           logger.info(
-            `📊 Recorded usage - Input: ${totalInputTokens}(actual:${actualInputTokens}+cached:${cacheReadTokens}), CacheCreate: ${cacheCreateTokens}, Output: ${outputTokens}, Total: ${totalTokens}, Model: ${modelToRecord}`
+            `📊 Recorded stream usage - Input: ${usageSummary.totalInputTokens}(actual:${usageSummary.inputTokens}+cached:${usageSummary.cacheReadTokens}), CacheCreate: ${usageSummary.cacheCreateTokens}, Output: ${usageSummary.outputTokens}, Total: ${usageSummary.totalTokens}, Model: ${modelToRecord}`
           )
-
-          // 更新账户的 token 使用统计
-          await openaiResponsesAccountService.updateAccountUsage(account.id, totalTokens)
-
-          // 更新账户使用额度（如果设置了额度限制）
-          if (parseFloat(account.dailyQuota) > 0) {
-            // 使用CostCalculator正确计算费用（考虑缓存token的不同价格）
-            const CostCalculator = require('../../utils/costCalculator')
-            const costInfo = CostCalculator.calculateCost(
-              {
-                input_tokens: actualInputTokens, // 实际输入（不含缓存）
-                output_tokens: outputTokens,
-                cache_creation_input_tokens: cacheCreateTokens,
-                cache_read_input_tokens: cacheReadTokens
-              },
-              modelToRecord,
-              serviceTier
-            )
-            await openaiResponsesAccountService.updateUsageQuota(account.id, costInfo.costs.total)
-          }
         } catch (error) {
           logger.error('Failed to record usage:', error)
         }
@@ -943,66 +1071,28 @@ class OpenAIResponsesRelayService {
     const actualModel =
       responseData?.model || responseData?.response?.model || requestedModel || 'gpt-4'
 
-    // 记录使用统计
-    if (usageData) {
-      try {
-        // OpenAI-Responses 使用 input_tokens/output_tokens，标准 OpenAI 使用 prompt_tokens/completion_tokens
-        const totalInputTokens = usageData.input_tokens || usageData.prompt_tokens || 0
-        const outputTokens = usageData.output_tokens || usageData.completion_tokens || 0
+    // 记录使用统计；成功但无 usage 时也补记 0-token 请求，用于 API Key 请求数和 lastUsedAt。
+    try {
+      const result = await this._recordSuccessfulUsage({
+        req,
+        res,
+        account,
+        apiKeyData,
+        requestedModel,
+        actualModel,
+        usageData,
+        stream: false,
+        statusCode: response.status,
+        context: 'openai-compatible-non-stream',
+        fallbackReason: usageData ? '' : 'non-stream response without usage'
+      })
 
-        // 提取缓存相关的 tokens（如果存在）
-        const cacheReadTokens = extractOpenAICacheReadTokens(usageData)
-        const cacheCreateTokens = extractCacheCreationTokens(usageData)
-        // 计算实际输入token（总输入减去缓存部分）
-        const actualInputTokens = Math.max(0, totalInputTokens - cacheReadTokens)
-
-        const totalTokens =
-          usageData.total_tokens || totalInputTokens + outputTokens + cacheCreateTokens
-
-        const serviceTier = req._serviceTier || null
-        await apiKeyService.recordUsage(
-          apiKeyData.id,
-          actualInputTokens, // 传递实际输入（不含缓存）
-          outputTokens,
-          cacheCreateTokens,
-          cacheReadTokens,
-          actualModel,
-          account.id,
-          'openai-responses',
-          serviceTier,
-          createRequestDetailMeta(req, {
-            requestBody: req?._openaiCompatibleUpstreamBody || req?.body,
-            stream: false,
-            statusCode: response.status
-          })
-        )
-
-        logger.info(
-          `📊 Recorded non-stream usage - Input: ${totalInputTokens}(actual:${actualInputTokens}+cached:${cacheReadTokens}), CacheCreate: ${cacheCreateTokens}, Output: ${outputTokens}, Total: ${totalTokens}, Model: ${actualModel}`
-        )
-
-        // 更新账户的 token 使用统计
-        await openaiResponsesAccountService.updateAccountUsage(account.id, totalTokens)
-
-        // 更新账户使用额度（如果设置了额度限制）
-        if (parseFloat(account.dailyQuota) > 0) {
-          // 使用CostCalculator正确计算费用（考虑缓存token的不同价格）
-          const CostCalculator = require('../../utils/costCalculator')
-          const costInfo = CostCalculator.calculateCost(
-            {
-              input_tokens: actualInputTokens, // 实际输入（不含缓存）
-              output_tokens: outputTokens,
-              cache_creation_input_tokens: cacheCreateTokens,
-              cache_read_input_tokens: cacheReadTokens
-            },
-            actualModel,
-            serviceTier
-          )
-          await openaiResponsesAccountService.updateUsageQuota(account.id, costInfo.costs.total)
-        }
-      } catch (error) {
-        logger.error('Failed to record usage:', error)
-      }
+      const { usageSummary, modelToRecord } = result
+      logger.info(
+        `📊 Recorded non-stream usage - Input: ${usageSummary.totalInputTokens}(actual:${usageSummary.inputTokens}+cached:${usageSummary.cacheReadTokens}), CacheCreate: ${usageSummary.cacheCreateTokens}, Output: ${usageSummary.outputTokens}, Total: ${usageSummary.totalTokens}, Model: ${modelToRecord}`
+      )
+    } catch (error) {
+      logger.error('Failed to record usage:', error)
     }
 
     if (req._openaiCompatibleResponseAdapter === 'responses_to_chat') {

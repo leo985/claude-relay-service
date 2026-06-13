@@ -23,8 +23,10 @@ export const useApiStatsStore = defineStore('apistats', () => {
   const oemSettings = ref({
     siteName: '',
     siteIcon: '',
-    siteIconData: ''
+    siteIconData: '',
+    apiStatsModelDisplayMode: 'hidden'
   })
+  const modelDisplayMode = ref('hidden')
 
   // 多 Key 模式相关状态
   const multiKeyMode = ref(false)
@@ -164,6 +166,7 @@ export const useApiStatsStore = defineStore('apistats', () => {
       error.value = err.message || '查询统计数据失败，请检查您的 API Key 是否正确'
       statsData.value = null
       modelStats.value = []
+      modelDisplayMode.value = oemSettings.value.apiStatsModelDisplayMode || 'hidden'
       apiId.value = null
     } finally {
       loading.value = false
@@ -197,6 +200,12 @@ export const useApiStatsStore = defineStore('apistats', () => {
       dailyModelStats.value = dailyResult.success ? dailyResult.data || [] : []
       monthlyModelStats.value = monthlyResult.success ? monthlyResult.data || [] : []
       alltimeModelStats.value = alltimeResult.success ? alltimeResult.data || [] : []
+      modelDisplayMode.value =
+        dailyResult.modelDisplayMode ||
+        monthlyResult.modelDisplayMode ||
+        alltimeResult.modelDisplayMode ||
+        oemSettings.value.apiStatsModelDisplayMode ||
+        'hidden'
 
       // 保持 modelStats 兼容性（用于现有组件）
       modelStats.value = dailyModelStats.value
@@ -217,6 +226,8 @@ export const useApiStatsStore = defineStore('apistats', () => {
       const result = await httpApis.getUserModelStatsApi(apiId.value, period)
 
       if (result.success) {
+        modelDisplayMode.value =
+          result.modelDisplayMode || oemSettings.value.apiStatsModelDisplayMode || 'hidden'
         // 计算汇总数据
         const modelData = result.data || []
         const summary = {
@@ -268,6 +279,8 @@ export const useApiStatsStore = defineStore('apistats', () => {
       const result = await httpApis.getUserModelStatsApi(apiId.value, period)
 
       if (result.success) {
+        modelDisplayMode.value =
+          result.modelDisplayMode || oemSettings.value.apiStatsModelDisplayMode || 'hidden'
         modelStats.value = result.data || []
       } else {
         throw new Error(result.message || '加载模型统计失败')
@@ -275,6 +288,7 @@ export const useApiStatsStore = defineStore('apistats', () => {
     } catch (err) {
       console.error('Load model stats error:', err)
       modelStats.value = []
+      modelDisplayMode.value = oemSettings.value.apiStatsModelDisplayMode || 'hidden'
     } finally {
       modelStatsLoading.value = false
     }
@@ -356,6 +370,7 @@ export const useApiStatsStore = defineStore('apistats', () => {
       const result = await httpApis.getOemSettingsApi()
       if (result && result.success && result.data) {
         oemSettings.value = { ...oemSettings.value, ...result.data }
+        modelDisplayMode.value = oemSettings.value.apiStatsModelDisplayMode || 'hidden'
       }
     } catch (err) {
       console.error('Error loading OEM settings:', err)
@@ -363,8 +378,10 @@ export const useApiStatsStore = defineStore('apistats', () => {
       oemSettings.value = {
         siteName: 'Claude Relay Service',
         siteIcon: '',
-        siteIconData: ''
+        siteIconData: '',
+        apiStatsModelDisplayMode: 'hidden'
       }
+      modelDisplayMode.value = 'hidden'
     } finally {
       oemLoading.value = false
     }
@@ -503,6 +520,8 @@ export const useApiStatsStore = defineStore('apistats', () => {
       const result = await httpApis.getBatchModelStatsApi(apiIds.value, period)
 
       if (result.success) {
+        modelDisplayMode.value =
+          result.modelDisplayMode || oemSettings.value.apiStatsModelDisplayMode || 'hidden'
         modelStats.value = result.data || []
       } else {
         throw new Error(result.message || '加载批量模型统计失败')
@@ -510,6 +529,7 @@ export const useApiStatsStore = defineStore('apistats', () => {
     } catch (err) {
       console.error('Load batch model stats error:', err)
       modelStats.value = []
+      modelDisplayMode.value = oemSettings.value.apiStatsModelDisplayMode || 'hidden'
     } finally {
       modelStatsLoading.value = false
     }
@@ -558,6 +578,7 @@ export const useApiStatsStore = defineStore('apistats', () => {
     statsPeriod.value = 'daily'
     apiId.value = null
     keyServiceRates.value = {}
+    modelDisplayMode.value = oemSettings.value.apiStatsModelDisplayMode || 'hidden'
     // 清除多 Key 模式数据
     apiKeys.value = []
     apiIds.value = []
@@ -591,6 +612,7 @@ export const useApiStatsStore = defineStore('apistats', () => {
     monthlyStats,
     alltimeStats,
     oemSettings,
+    modelDisplayMode,
     // 多 Key 模式状态
     multiKeyMode,
     apiKeys,

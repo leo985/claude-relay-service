@@ -536,7 +536,7 @@ import ServiceCostCards from '@/components/apistats/ServiceCostCards.vue'
 import TutorialView from './TutorialView.vue'
 import UnifiedTestModal from '@/components/common/UnifiedTestModal.vue'
 
-const API_STATS_BRAND_NAME = '一站式AI网关'
+const API_STATS_BRAND_NAME = '智慧之源，所有能力汇聚于此'
 
 const route = useRoute()
 const apiStatsStore = useApiStatsStore()

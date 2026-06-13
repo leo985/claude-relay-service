@@ -108,6 +108,14 @@ function createHash(value) {
   return crypto.createHash('sha256').update(value).digest('hex')
 }
 
+const RESPONSES_REQUEST_FEATURES = {
+  endpointKind: 'responses',
+  hasTools: false,
+  hasImages: false,
+  hasReasoning: false,
+  openaiResponsesOnly: false
+}
+
 function createReq({
   path = '/v1/responses',
   body = {},
@@ -205,7 +213,8 @@ describe('openai responses payload toggles', () => {
     expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenCalledWith(
       req.apiKey,
       createHash('session-a'),
-      'gpt-5'
+      'gpt-5',
+      RESPONSES_REQUEST_FEATURES
     )
   })
 
@@ -228,7 +237,8 @@ describe('openai responses payload toggles', () => {
     expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenCalledWith(
       req.apiKey,
       createHash('session-b'),
-      'gpt-5'
+      'gpt-5',
+      RESPONSES_REQUEST_FEATURES
     )
   })
 
@@ -267,7 +277,8 @@ describe('openai responses payload toggles', () => {
     expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenCalledWith(
       req.apiKey,
       createHash('new-key'),
-      'gpt-5'
+      'gpt-5',
+      RESPONSES_REQUEST_FEATURES
     )
   })
 
@@ -298,7 +309,8 @@ describe('openai responses payload toggles', () => {
     expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenCalledWith(
       req.apiKey,
       createHash('rule-key'),
-      'gpt-5-codex'
+      'gpt-5-codex',
+      RESPONSES_REQUEST_FEATURES
     )
   })
 
@@ -344,7 +356,8 @@ describe('openai responses payload toggles', () => {
     expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenCalledWith(
       req.apiKey,
       createHash('compat-key'),
-      'gpt-5'
+      'gpt-5',
+      RESPONSES_REQUEST_FEATURES
     )
     expect(req.body.model).toBe('gpt-5')
     expect(req.body.service_tier).toBe('priority')
@@ -401,7 +414,8 @@ describe('openai responses payload toggles', () => {
     expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenCalledWith(
       req.apiKey,
       createHash('rule-model-key'),
-      'gpt-5'
+      'gpt-5',
+      RESPONSES_REQUEST_FEATURES
     )
     expect(req.body.model).toBe('gpt-5')
     expect(req.body.text).toEqual({ format: {} })

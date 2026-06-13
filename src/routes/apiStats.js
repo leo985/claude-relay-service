@@ -6,6 +6,7 @@ const CostCalculator = require('../utils/costCalculator')
 const claudeAccountService = require('../services/account/claudeAccountService')
 const openaiAccountService = require('../services/account/openaiAccountService')
 const serviceRatesService = require('../services/serviceRatesService')
+const config = require('../../config/config')
 const {
   createClaudeTestPayload,
   extractErrorMessage,
@@ -13,8 +14,43 @@ const {
 } = require('../utils/testPayloadHelper')
 const modelsConfig = require('../../config/models')
 const { getSafeMessage } = require('../utils/errorSanitizer')
+const {
+  normalizeApiStatsModelDisplayMode,
+  sanitizeModelStatsForDisplay
+} = require('../utils/apiStatsModelDisplay')
 
 const router = express.Router()
+
+async function getApiStatsModelDisplayMode() {
+  const defaultMode = normalizeApiStatsModelDisplayMode(config.apiStats?.modelDisplayMode)
+
+  try {
+    const client = redis.getClientSafe()
+    const oemSettings = await client.get('oem:settings')
+    if (!oemSettings) {
+      return defaultMode
+    }
+
+    const parsed = JSON.parse(oemSettings)
+    return normalizeApiStatsModelDisplayMode(
+      parsed.apiStatsModelDisplayMode || defaultMode,
+      defaultMode
+    )
+  } catch (error) {
+    logger.warn('⚠️ Failed to resolve API Stats model display mode, using default:', error.message)
+    return defaultMode
+  }
+}
+
+async function createModelStatsResponse(modelStats, period) {
+  const modelDisplayMode = await getApiStatsModelDisplayMode()
+  return {
+    success: true,
+    data: sanitizeModelStatsForDisplay(modelStats, modelDisplayMode),
+    period,
+    modelDisplayMode
+  }
+}
 
 // 📋 获取可用模型列表（公开接口）
 router.get('/models', (req, res) => {
@@ -907,6 +943,7 @@ router.post('/api/batch-model-stats', async (req, res) => {
 
       modelStats.push({
         model,
+        service: serviceRatesService.getServiceFromModel(model),
         requests: usage.requests,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
@@ -925,11 +962,7 @@ router.post('/api/batch-model-stats', async (req, res) => {
 
     logger.api(`📊 Batch model stats query for ${apiIds.length} keys, period: ${period}`)
 
-    return res.json({
-      success: true,
-      data: modelStats,
-      period
-    })
+    return res.json(await createModelStatsResponse(modelStats, period))
   } catch (error) {
     logger.error('❌ Failed to process batch model stats query:', error)
     return res.status(500).json({
@@ -946,7 +979,6 @@ const sanitizeMaxTokens = (value) =>
 
 // 🧪 API Key 端点测试接口 - 测试API Key是否能正常访问服务
 router.post('/api-key/test', async (req, res) => {
-  const config = require('../../config/config')
   const { sendStreamTestRequest } = require('../utils/testPayloadHelper')
 
   try {
@@ -1011,7 +1043,6 @@ router.post('/api-key/test', async (req, res) => {
 
 // 🧪 Gemini API Key 端点测试接口
 router.post('/api-key/test-gemini', async (req, res) => {
-  const config = require('../../config/config')
   const { createGeminiTestPayload } = require('../utils/testPayloadHelper')
 
   try {
@@ -1163,7 +1194,6 @@ router.post('/api-key/test-gemini', async (req, res) => {
 
 // 🧪 OpenAI/Codex API Key 端点测试接口
 router.post('/api-key/test-openai', async (req, res) => {
-  const config = require('../../config/config')
   const { createOpenAITestPayload } = require('../utils/testPayloadHelper')
 
   try {
@@ -1471,6 +1501,7 @@ router.post('/api/user-model-stats', async (req, res) => {
 
         modelStats.push({
           model,
+          service: serviceRatesService.getServiceFromModel(model),
           requests: parseInt(data.requests) || 0,
           inputTokens: usage.input_tokens,
           outputTokens: usage.output_tokens,
@@ -1494,11 +1525,7 @@ router.post('/api/user-model-stats', async (req, res) => {
     // 按总token数降序排列
     modelStats.sort((a, b) => b.allTokens - a.allTokens)
 
-    return res.json({
-      success: true,
-      data: modelStats,
-      period
-    })
+    return res.json(await createModelStatsResponse(modelStats, period))
   } catch (error) {
     logger.error('❌ Failed to process user model stats query:', error)
     return res.status(500).json({

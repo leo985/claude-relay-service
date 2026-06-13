@@ -28,12 +28,18 @@
         <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
           <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
             <h4
-              class="cursor-pointer text-sm font-bold text-gray-900 hover:text-indigo-600 dark:text-gray-100 dark:hover:text-indigo-400"
-              title="点击复制"
-              @click="copyModelName(model.model)"
+              :class="[
+                'text-sm font-bold text-gray-900 dark:text-gray-100',
+                canCopyModelName(model)
+                  ? 'cursor-pointer hover:text-indigo-600 dark:hover:text-indigo-400'
+                  : 'cursor-default'
+              ]"
+              :title="canCopyModelName(model) ? '点击复制' : '模型名称已隐藏'"
+              @click="copyModelName(model)"
             >
-              {{ model.model }}
-              <i class="fas fa-copy ml-1 text-xs text-gray-400" />
+              {{ displayModelName(model, index) }}
+              <i v-if="canCopyModelName(model)" class="fas fa-copy ml-1 text-xs text-gray-400" />
+              <i v-else class="fas fa-eye-slash ml-1 text-xs text-gray-400" />
             </h4>
             <div class="flex flex-wrap gap-x-2 text-xs text-gray-500 dark:text-gray-400">
               <span>{{ model.requests }}次</span>
@@ -86,8 +92,14 @@ const props = defineProps({
 })
 
 const apiStatsStore = useApiStatsStore()
-const { dailyModelStats, monthlyModelStats, alltimeModelStats, modelStatsLoading, serviceRates } =
-  storeToRefs(apiStatsStore)
+const {
+  dailyModelStats,
+  monthlyModelStats,
+  alltimeModelStats,
+  modelStatsLoading,
+  serviceRates,
+  modelDisplayMode
+} = storeToRefs(apiStatsStore)
 
 // 根据 period 选择对应的数据
 const stats = computed(() => {
@@ -106,8 +118,21 @@ const periodLabel = computed(() => {
   return ''
 })
 
+const displayModelName = (model, index) => {
+  if (model?.model) return model.model
+  if (modelDisplayMode.value === 'masked') return `Model #${index + 1}`
+  if (modelDisplayMode.value === 'hidden') return 'Hidden model'
+  return 'unknown'
+}
+
+const canCopyModelName = (model) =>
+  modelDisplayMode.value === 'raw' && model?.modelNameHidden !== true && !!model?.model
+
 // 复制模型名称
-const copyModelName = (name) => copyText(name, '模型名称已复制')
+const copyModelName = (model) => {
+  if (!canCopyModelName(model)) return
+  copyText(model.model, '模型名称已复制')
+}
 
 // 根据模型名称判断服务类型
 const getServiceFromModel = (model) => {
@@ -135,7 +160,7 @@ const calculateCcCost = (model) => {
   // 回退到重新计算（历史数据）
   const cost = model.costs?.total || 0
   if (!cost || !serviceRates.value?.rates) return '$0.00'
-  const service = getServiceFromModel(model.model)
+  const service = model.service || getServiceFromModel(model.model)
   const rate = serviceRates.value.rates[service] || 1.0
   const ccCost = cost * rate
   if (ccCost >= 1) return '$' + ccCost.toFixed(2)

@@ -123,6 +123,39 @@ function normalizeGpt5ModelForCodex(body = {}) {
   return compatibleModel
 }
 
+async function recordSuccessfulOpenAIRequestWithoutUsage({
+  req,
+  apiKeyData,
+  accountId,
+  accountType,
+  model,
+  stream,
+  statusCode
+}) {
+  const costs = await apiKeyService.recordUsage(
+    apiKeyData.id,
+    0,
+    0,
+    0,
+    0,
+    model || 'gpt-4',
+    accountId,
+    accountType,
+    req._serviceTier,
+    createRequestDetailMeta(req, {
+      requestBody: req.body,
+      stream,
+      statusCode
+    })
+  )
+
+  logger.warn(
+    `📊 Recorded successful OpenAI request without usage - Model: ${model || 'gpt-4'}, Stream: ${stream}`
+  )
+
+  return costs
+}
+
 function applyCodexCliAdaptation(body = {}) {
   const fieldsToRemove = [
     'temperature',
@@ -768,6 +801,16 @@ const handleResponses = async (req, res) => {
             'openai',
             nonStreamCosts
           )
+        } else if (upstream.status >= 200 && upstream.status < 300) {
+          await recordSuccessfulOpenAIRequestWithoutUsage({
+            req,
+            apiKeyData,
+            accountId,
+            accountType: 'openai',
+            model: actualModel,
+            stream: false,
+            statusCode: upstream.status
+          })
         }
 
         // 返回响应
@@ -894,6 +937,27 @@ const handleResponses = async (req, res) => {
           )
         } catch (error) {
           logger.error('Failed to record OpenAI usage:', error)
+        }
+      } else if (
+        !usageReported &&
+        !rateLimitDetected &&
+        upstream.status >= 200 &&
+        upstream.status < 300
+      ) {
+        try {
+          const modelToRecord = actualModel || upstreamRequestedModel || 'gpt-4'
+          await recordSuccessfulOpenAIRequestWithoutUsage({
+            req,
+            apiKeyData,
+            accountId,
+            accountType: 'openai',
+            model: modelToRecord,
+            stream: true,
+            statusCode: res.statusCode
+          })
+          usageReported = true
+        } catch (error) {
+          logger.error('Failed to record OpenAI request without usage:', error)
         }
       }
 

@@ -218,6 +218,38 @@
                   </td>
                 </tr>
 
+                <!-- API Stats 模型名显示 -->
+                <tr class="table-row">
+                  <td class="w-48 whitespace-nowrap px-6 py-4">
+                    <div class="flex items-center">
+                      <div
+                        class="mr-3 flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600"
+                      >
+                        <i class="fas fa-user-secret text-xs text-white" />
+                      </div>
+                      <div>
+                        <div class="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                          模型名显示
+                        </div>
+                        <div class="text-xs text-gray-500 dark:text-gray-400">API Stats</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td class="px-6 py-4">
+                    <select
+                      v-model="oemSettings.apiStatsModelDisplayMode"
+                      class="form-input w-full max-w-md dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                    >
+                      <option value="raw">显示真实模型名</option>
+                      <option value="masked">脱敏显示（Model #1）</option>
+                      <option value="hidden">隐藏显示（Hidden model）</option>
+                    </select>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      masked/hidden 会在后端脱敏统计接口返回值，并禁用前端复制模型名。
+                    </p>
+                  </td>
+                </tr>
+
                 <!-- API Stats 通知 -->
                 <tr class="border-b border-gray-100 dark:border-gray-700">
                   <td class="w-48 whitespace-nowrap px-6 py-4">
@@ -430,6 +462,36 @@
                   隐藏后，用户需要直接访问 /admin/login 页面登录
                 </p>
               </div>
+            </div>
+
+            <!-- API Stats 模型名显示卡片 -->
+            <div class="glass-card p-4">
+              <div class="mb-3 flex items-center gap-3">
+                <div
+                  class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 text-white shadow-md"
+                >
+                  <i class="fas fa-user-secret"></i>
+                </div>
+                <div>
+                  <h3 class="text-base font-semibold text-gray-900 dark:text-gray-100">
+                    API Stats 模型名显示
+                  </h3>
+                  <p class="text-sm text-gray-500 dark:text-gray-400">
+                    控制统计页是否暴露上游模型名
+                  </p>
+                </div>
+              </div>
+              <select
+                v-model="oemSettings.apiStatsModelDisplayMode"
+                class="form-input w-full dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+              >
+                <option value="raw">显示真实模型名</option>
+                <option value="masked">脱敏显示（Model #1）</option>
+                <option value="hidden">隐藏显示（Hidden model）</option>
+              </select>
+              <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                masked/hidden 会在后端脱敏统计接口返回值，并禁用前端复制模型名。
+              </p>
             </div>
 
             <!-- 操作按钮卡片 -->
@@ -3127,6 +3189,7 @@ const saveOemSettings = async () => {
       siteIcon: oemSettings.value.siteIcon,
       siteIconData: oemSettings.value.siteIconData,
       showAdminButton: oemSettings.value.showAdminButton,
+      apiStatsModelDisplayMode: oemSettings.value.apiStatsModelDisplayMode || 'raw',
       apiStatsNotice: oemSettings.value.apiStatsNotice
     }
     const result = await settingsStore.saveOemSettings(settings)

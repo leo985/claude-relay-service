@@ -8,6 +8,10 @@ const redis = require('../../models/redis')
 const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const config = require('../../../config/config')
+const {
+  VALID_API_STATS_MODEL_DISPLAY_MODES,
+  normalizeApiStatsModelDisplayMode
+} = require('../../utils/apiStatsModelDisplay')
 
 const router = express.Router()
 
@@ -267,6 +271,9 @@ router.get('/oem-settings', async (req, res) => {
       siteIcon: '',
       siteIconData: '', // Base64编码的图标数据
       showAdminButton: true, // 是否显示管理后台按钮
+      apiStatsModelDisplayMode: normalizeApiStatsModelDisplayMode(
+        config.apiStats?.modelDisplayMode
+      ),
       apiStatsNotice: {
         enabled: false,
         title: '',
@@ -283,6 +290,9 @@ router.get('/oem-settings', async (req, res) => {
         logger.warn('⚠️ Failed to parse OEM settings, using defaults:', err.message)
       }
     }
+    settings.apiStatsModelDisplayMode = normalizeApiStatsModelDisplayMode(
+      settings.apiStatsModelDisplayMode
+    )
 
     // 添加 LDAP 启用状态到响应中
     return res.json({
@@ -301,7 +311,14 @@ router.get('/oem-settings', async (req, res) => {
 // 更新OEM设置
 router.put('/oem-settings', authenticateAdmin, async (req, res) => {
   try {
-    const { siteName, siteIcon, siteIconData, showAdminButton, apiStatsNotice } = req.body
+    const {
+      siteName,
+      siteIcon,
+      siteIconData,
+      showAdminButton,
+      apiStatsNotice,
+      apiStatsModelDisplayMode
+    } = req.body
 
     // 验证输入
     if (!siteName || typeof siteName !== 'string' || siteName.trim().length === 0) {
@@ -328,11 +345,24 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
       }
     }
 
+    const normalizedApiStatsModelDisplayMode = normalizeApiStatsModelDisplayMode(
+      apiStatsModelDisplayMode || config.apiStats?.modelDisplayMode
+    )
+    if (
+      apiStatsModelDisplayMode &&
+      normalizedApiStatsModelDisplayMode !== String(apiStatsModelDisplayMode).trim().toLowerCase()
+    ) {
+      return res.status(400).json({
+        error: `Invalid apiStatsModelDisplayMode. Must be one of: ${VALID_API_STATS_MODEL_DISPLAY_MODES.join(', ')}`
+      })
+    }
+
     const settings = {
       siteName: siteName.trim(),
       siteIcon: (siteIcon || '').trim(),
       siteIconData: (siteIconData || '').trim(), // Base64数据
       showAdminButton: showAdminButton !== false, // 默认为true
+      apiStatsModelDisplayMode: normalizedApiStatsModelDisplayMode,
       apiStatsNotice: {
         enabled: apiStatsNotice?.enabled === true,
         title: (apiStatsNotice?.title || '').trim().slice(0, 100),

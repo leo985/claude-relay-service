@@ -10,6 +10,7 @@ export const useSettingsStore = defineStore('settings', () => {
     siteIcon: '',
     siteIconData: '',
     showAdminButton: true,
+    apiStatsModelDisplayMode: 'hidden',
     apiStatsNotice: { enabled: false, title: '', content: '' },
     updatedAt: null
   })
@@ -46,6 +47,7 @@ export const useSettingsStore = defineStore('settings', () => {
       siteIcon: '',
       siteIconData: '',
       showAdminButton: true,
+      apiStatsModelDisplayMode: 'hidden',
       apiStatsNotice: { enabled: false, title: '', content: '' },
       updatedAt: null
     }

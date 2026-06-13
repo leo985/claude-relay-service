@@ -166,7 +166,7 @@ const serviceStats = computed(() => {
 
   // 聚合模型数据 - 按模型逐个计算计费费用
   modelStats.value.forEach((model) => {
-    const service = getServiceFromModel(model.model)
+    const service = model.service || getServiceFromModel(model.model)
     if (stats[service]) {
       stats[service].inputTokens += model.inputTokens || 0
       stats[service].outputTokens += model.outputTokens || 0

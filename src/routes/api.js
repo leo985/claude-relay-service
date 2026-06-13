@@ -14,6 +14,8 @@ const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const claudeRelayConfigService = require('../services/claudeRelayConfigService')
 const claudeAccountService = require('../services/account/claudeAccountService')
 const claudeConsoleAccountService = require('../services/account/claudeConsoleAccountService')
+const openaiResponsesRelayService = require('../services/relay/openaiResponsesRelayService')
+const openaiResponsesAccountService = require('../services/account/openaiResponsesAccountService')
 const {
   isWarmupRequest,
   buildMockWarmupResponse,
@@ -375,6 +377,28 @@ async function handleMessagesRequest(req, res) {
           )
           return
         }
+
+        // Fallback: 当没有 Claude 账号可用时，尝试 OpenAI Responses 账号（passthrough 模式）
+        if (
+          error.message &&
+          error.message.includes('No available Claude accounts') &&
+          req.apiKey?.openaiAccountId?.startsWith('responses:')
+        ) {
+          const responsesAccountId = req.apiKey.openaiAccountId.replace('responses:', '')
+          logger.info(`🔀 Attempting fallback to OpenAI Responses account: ${responsesAccountId} for /v1/messages`)
+          try {
+            const responsesAccount = await openaiResponsesAccountService.getAccount(responsesAccountId)
+            if (responsesAccount && responsesAccount.isActive !== false && responsesAccount.status !== 'error') {
+              logger.info(`🔀 Falling back to OpenAI Responses account: ${responsesAccount.name} (passthrough) for /v1/messages`)
+              return await openaiResponsesRelayService.handleRequest(req, res, responsesAccount, req.apiKey)
+            } else {
+              logger.warn(`🔀 Fallback account ${responsesAccountId} not available: active=${responsesAccount?.isActive}, status=${responsesAccount?.status}`)
+            }
+          } catch (fallbackError) {
+            logger.error(`❌ Fallback to OpenAI Responses failed: ${fallbackError.message}`)
+          }
+        }
+
         throw error
       }
 
@@ -1080,6 +1104,28 @@ async function handleMessagesRequest(req, res) {
             message: limitMessage
           })
         }
+
+        // Fallback: 当没有 Claude 账号可用时，尝试 OpenAI Responses 账号（passthrough 模式）
+        if (
+          error.message &&
+          error.message.includes('No available Claude accounts') &&
+          req.apiKey?.openaiAccountId?.startsWith('responses:')
+        ) {
+          const responsesAccountId = req.apiKey.openaiAccountId.replace('responses:', '')
+          logger.info(`🔀 [Non-stream] Attempting fallback to OpenAI Responses account: ${responsesAccountId} for /v1/messages`)
+          try {
+            const responsesAccount = await openaiResponsesAccountService.getAccount(responsesAccountId)
+            if (responsesAccount && responsesAccount.isActive !== false && responsesAccount.status !== 'error') {
+              logger.info(`🔀 [Non-stream] Falling back to OpenAI Responses account: ${responsesAccount.name} (passthrough) for /v1/messages`)
+              return await openaiResponsesRelayService.handleRequest(req, res, responsesAccount, req.apiKey)
+            } else {
+              logger.warn(`🔀 [Non-stream] Fallback account ${responsesAccountId} not available: active=${responsesAccount?.isActive}, status=${responsesAccount?.status}`)
+            }
+          } catch (fallbackError) {
+            logger.error(`❌ [Non-stream] Fallback to OpenAI Responses failed: ${fallbackError.message}`)
+          }
+        }
+
         throw error
       }
 

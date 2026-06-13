@@ -15,6 +15,7 @@ export const useAuthStore = defineStore('auth', () => {
     siteName: 'Claude Relay Service',
     siteIcon: '',
     siteIconData: '',
+    apiStatsModelDisplayMode: 'hidden',
     faviconData: ''
   })
   const oemLoading = ref(true)

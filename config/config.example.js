@@ -138,6 +138,15 @@ const config = {
     sessionSecret: process.env.WEB_SESSION_SECRET || 'CHANGE-THIS-SESSION-SECRET'
   },
 
+  // 📊 API Stats 页面配置
+  apiStats: {
+    // raw: 显示真实模型名；masked: 显示 Model #1；hidden: 显示 Hidden model
+    modelDisplayMode: (() => {
+      const mode = (process.env.API_STATS_MODEL_DISPLAY_MODE || 'hidden').trim().toLowerCase()
+      return ['raw', 'masked', 'hidden'].includes(mode) ? mode : 'hidden'
+    })()
+  },
+
   // 🔐 LDAP 认证配置
   ldap: {
     enabled: process.env.LDAP_ENABLED === 'true',
