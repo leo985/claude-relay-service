@@ -72,4 +72,50 @@ describe('UnifiedOpenAIScheduler', () => {
       )
     })
   })
+
+  describe('_rankOpenAIResponsesAccount image features', () => {
+    it('requires image generation support for Images API requests', () => {
+      const result = unifiedOpenAIScheduler._rankOpenAIResponsesAccount(
+        {
+          providerEndpoint: 'responses',
+          supportsImageGeneration: false,
+          imageBoundModel: 'gpt-image-2'
+        },
+        'gpt-image-2',
+        {
+          endpointKind: 'images',
+          hasImageGeneration: true,
+          imageModel: 'gpt-image-2',
+          openaiResponsesOnly: true
+        }
+      )
+
+      expect(result).toEqual({
+        ok: false,
+        reason: 'image_generation_not_supported',
+        rank: 0
+      })
+    })
+
+    it('uses imageBoundModel instead of text boundModel for Images API requests', () => {
+      const result = unifiedOpenAIScheduler._rankOpenAIResponsesAccount(
+        {
+          providerEndpoint: 'responses',
+          supportsImageGeneration: true,
+          boundModel: 'gpt-5.5',
+          imageBoundModel: 'gpt-image-2'
+        },
+        'gpt-image-2',
+        {
+          endpointKind: 'images',
+          hasImageGeneration: true,
+          imageModel: 'gpt-image-2',
+          openaiResponsesOnly: true
+        }
+      )
+
+      expect(result.ok).toBe(true)
+      expect(result.rank).toBe(3)
+    })
+  })
 })

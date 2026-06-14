@@ -8,6 +8,7 @@ const unifiedOpenAIScheduler = require('../services/scheduler/unifiedOpenAISched
 const openaiAccountService = require('../services/account/openaiAccountService')
 const openaiResponsesAccountService = require('../services/account/openaiResponsesAccountService')
 const openaiResponsesRelayService = require('../services/relay/openaiResponsesRelayService')
+const openaiImageRelayService = require('../services/relay/openaiImageRelayService')
 const apiKeyService = require('../services/apiKeyService')
 const redis = require('../models/redis')
 const crypto = require('crypto')
@@ -23,6 +24,7 @@ const requestBodyRuleService = require('../services/requestBodyRuleService')
 const {
   clonePlainObject,
   detectEndpointKindFromPath,
+  getRequestFeaturesForImages,
   getRequestFeaturesFromBody
 } = require('../utils/openaiCompatible')
 
@@ -1061,11 +1063,126 @@ const handleResponses = async (req, res) => {
   }
 }
 
+const createUnsupportedOpenAIAccountTypeResponse = (res) =>
+  res.status(400).json({
+    error: {
+      message: 'Image generation is only supported with OpenAI-Responses type accounts',
+      type: 'invalid_request_error',
+      code: 'unsupported_account_type'
+    }
+  })
+
+const handleImageGenerations = async (req, res) => {
+  try {
+    const apiKeyData = req.apiKey || {}
+
+    if (!checkOpenAIPermissions(apiKeyData)) {
+      return res.status(403).json({
+        error: {
+          message: 'This API key does not have permission to access OpenAI',
+          type: 'permission_denied',
+          code: 'permission_denied'
+        }
+      })
+    }
+
+    req.body = req.body || {}
+    if (!req.body.model) {
+      req.body.model = 'gpt-image-2'
+    }
+
+    const requestFeatures = getRequestFeaturesForImages(req.body, { operation: 'generations' })
+    const { accountType, account } = await getOpenAIAuthToken(
+      apiKeyData,
+      null,
+      req.body.model,
+      requestFeatures
+    )
+
+    if (accountType !== 'openai-responses') {
+      return createUnsupportedOpenAIAccountTypeResponse(res)
+    }
+
+    return openaiImageRelayService.handleGenerations(req, res, account, apiKeyData)
+  } catch (error) {
+    logger.error('Image generations request failed:', error)
+    if (res.headersSent) {
+      return res.end()
+    }
+    return res.status(error.statusCode || 500).json({
+      error: {
+        message: error.message || 'Internal server error',
+        type: error.code || 'api_error',
+        code: error.code || 'internal_error'
+      }
+    })
+  }
+}
+
+const handleImageEdits = async (req, res) => {
+  try {
+    const apiKeyData = req.apiKey || {}
+
+    if (!checkOpenAIPermissions(apiKeyData)) {
+      return res.status(403).json({
+        error: {
+          message: 'This API key does not have permission to access OpenAI',
+          type: 'permission_denied',
+          code: 'permission_denied'
+        }
+      })
+    }
+
+    if (!/^multipart\/form-data/i.test(req.headers['content-type'] || '')) {
+      return res.status(415).json({
+        error: {
+          message: 'Image edits require multipart/form-data in MVP',
+          type: 'invalid_request_error',
+          code: 'unsupported_media_type'
+        }
+      })
+    }
+
+    const requestFeatures = getRequestFeaturesForImages(null, {
+      operation: 'edits',
+      defaultModel: 'gpt-image-2'
+    })
+    const { accountType, account } = await getOpenAIAuthToken(
+      apiKeyData,
+      null,
+      requestFeatures.imageModel,
+      requestFeatures
+    )
+
+    if (accountType !== 'openai-responses') {
+      return createUnsupportedOpenAIAccountTypeResponse(res)
+    }
+
+    return openaiImageRelayService.handleEdits(req, res, account, apiKeyData)
+  } catch (error) {
+    logger.error('Image edits request failed:', error)
+    if (res.headersSent) {
+      return res.end()
+    }
+    return res.status(error.statusCode || 500).json({
+      error: {
+        message: error.message || 'Internal server error',
+        type: error.code || 'api_error',
+        code: error.code || 'internal_error'
+      }
+    })
+  }
+}
+
 // 注册两个路由路径，都使用相同的处理函数
 router.post('/responses', authenticateApiKey, handleResponses)
 router.post('/v1/responses', authenticateApiKey, handleResponses)
 router.post('/responses/compact', authenticateApiKey, handleResponses)
 router.post('/v1/responses/compact', authenticateApiKey, handleResponses)
+router.post('/images/generations', authenticateApiKey, handleImageGenerations)
+router.post('/v1/images/generations', authenticateApiKey, handleImageGenerations)
+router.post('/images/edits', authenticateApiKey, handleImageEdits)
+router.post('/v1/images/edits', authenticateApiKey, handleImageEdits)
 
 // 使用情况统计端点
 router.get('/usage', authenticateApiKey, async (req, res) => {
@@ -1133,4 +1250,6 @@ router.get('/key-info', authenticateApiKey, async (req, res) => {
 
 module.exports = router
 module.exports.handleResponses = handleResponses
+module.exports.handleImageGenerations = handleImageGenerations
+module.exports.handleImageEdits = handleImageEdits
 module.exports.CODEX_CLI_INSTRUCTIONS = CODEX_CLI_INSTRUCTIONS

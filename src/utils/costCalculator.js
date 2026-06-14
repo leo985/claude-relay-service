@@ -111,6 +111,11 @@ class CostCalculator {
     return pricingData?.litellm_provider === 'openai'
   }
 
+  static toNonNegativeNumber(value) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0
+  }
+
   static getPricingSource(model, pricingData) {
     if (pricingData) {
       return 'dynamic'
@@ -324,6 +329,97 @@ class CostCalculator {
     }
 
     return this.buildLegacyCostResult(usage, model, serviceTier)
+  }
+
+  /**
+   * 计算 OpenAI Images API 费用。
+   * 图片模型在 LiteLLM 定价中使用 image-token 专用字段，不能走文本 token 价格兜底。
+   */
+  static calculateImageCost(imageUsage = {}, model = 'unknown') {
+    const safeModel = typeof model === 'string' && model ? model : 'unknown'
+    const pricingData = pricingService.getModelPricing(safeModel)
+
+    const inputTextTokens = this.toNonNegativeNumber(imageUsage.inputTextTokens)
+    const inputImageTokens = this.toNonNegativeNumber(imageUsage.inputImageTokens)
+    const outputImageTokens = this.toNonNegativeNumber(imageUsage.outputImageTokens)
+    const cacheReadTextTokens = this.toNonNegativeNumber(imageUsage.cacheReadTextTokens)
+    const cacheReadImageTokens = this.toNonNegativeNumber(imageUsage.cacheReadImageTokens)
+    const totalTokens =
+      this.toNonNegativeNumber(imageUsage.totalTokens) ||
+      inputTextTokens +
+        inputImageTokens +
+        outputImageTokens +
+        cacheReadTextTokens +
+        cacheReadImageTokens
+
+    const pricing = {
+      inputText: pricingData?.input_cost_per_token || 0,
+      inputImage: pricingData?.input_cost_per_image_token || 0,
+      outputImage: pricingData?.output_cost_per_image_token || 0,
+      cacheReadText: pricingData?.cache_read_input_token_cost || 0,
+      cacheReadImage: pricingData?.cache_read_input_image_token_cost || 0
+    }
+
+    const inputTextCost = inputTextTokens * pricing.inputText
+    const inputImageCost = inputImageTokens * pricing.inputImage
+    const outputImageCost = outputImageTokens * pricing.outputImage
+    const cacheReadTextCost = cacheReadTextTokens * pricing.cacheReadText
+    const cacheReadImageCost = cacheReadImageTokens * pricing.cacheReadImage
+    const inputCost = inputTextCost + inputImageCost
+    const outputCost = outputImageCost
+    const cacheReadCost = cacheReadTextCost + cacheReadImageCost
+    const totalCost = inputCost + outputCost + cacheReadCost
+
+    return {
+      model: safeModel,
+      pricing: {
+        inputText: pricing.inputText * 1000000,
+        inputImage: pricing.inputImage * 1000000,
+        outputImage: pricing.outputImage * 1000000,
+        cacheReadText: pricing.cacheReadText * 1000000,
+        cacheReadImage: pricing.cacheReadImage * 1000000
+      },
+      usingDynamicPricing: !!pricingData,
+      usage: {
+        kind: 'image',
+        inputTextTokens,
+        inputImageTokens,
+        outputImageTokens,
+        cacheReadTextTokens,
+        cacheReadImageTokens,
+        totalTokens
+      },
+      costs: {
+        inputText: inputTextCost,
+        inputImage: inputImageCost,
+        input: inputCost,
+        outputImage: outputImageCost,
+        output: outputCost,
+        cacheReadText: cacheReadTextCost,
+        cacheReadImage: cacheReadImageCost,
+        cacheRead: cacheReadCost,
+        cacheCreate: 0,
+        cacheWrite: 0,
+        ephemeral5m: 0,
+        ephemeral1h: 0,
+        total: totalCost
+      },
+      formatted: {
+        inputText: this.formatCost(inputTextCost),
+        inputImage: this.formatCost(inputImageCost),
+        input: this.formatCost(inputCost),
+        outputImage: this.formatCost(outputImageCost),
+        output: this.formatCost(outputCost),
+        cacheRead: this.formatCost(cacheReadCost),
+        total: this.formatCost(totalCost)
+      },
+      debug: {
+        hasPricing: !!pricingData,
+        pricingSource: pricingData ? 'dynamic' : 'missing-image-pricing',
+        usedFallbackPricing: false,
+        usageKind: 'image'
+      }
+    }
   }
 
   /**

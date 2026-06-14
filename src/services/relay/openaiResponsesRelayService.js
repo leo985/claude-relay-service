@@ -67,8 +67,7 @@ function summarizeUsage(usageData = {}) {
   const cacheCreateTokens = extractCacheCreationTokens(usageData)
   const actualInputTokens = Math.max(0, totalInputTokens - cacheReadTokens)
   const totalTokens =
-    toFiniteNumber(usageData.total_tokens) ||
-    totalInputTokens + outputTokens + cacheCreateTokens
+    toFiniteNumber(usageData.total_tokens) || totalInputTokens + outputTokens + cacheCreateTokens
 
   return {
     totalInputTokens,
@@ -223,6 +222,11 @@ class OpenAIResponsesRelayService {
         'This OpenAI-compatible account does not support reasoning fields'
       )
     }
+    if (features.hasImageGeneration && account.supportsImageGeneration !== true) {
+      throw createOpenAICompatibleError(
+        'This OpenAI-compatible account does not support image generation'
+      )
+    }
 
     const maxOutputTokens = parseInt(account.maxOutputTokens, 10) || 0
     if (maxOutputTokens <= 0 || !body || typeof body !== 'object') {
@@ -285,16 +289,13 @@ class OpenAIResponsesRelayService {
         )
       }
     } catch (error) {
-      logger.error(
-        `❌ Failed to update OpenAI-compatible rate limit counters (${context}):`,
-        error
-      )
+      logger.error(`❌ Failed to update OpenAI-compatible rate limit counters (${context}):`, error)
     }
   }
 
   async _recordSuccessfulUsage({
     req,
-    res,
+    res: _res,
     account,
     apiKeyData,
     requestedModel,
@@ -309,23 +310,22 @@ class OpenAIResponsesRelayService {
     const usageSummary = usageData ? summarizeUsage(usageData) : emptyUsageSummary()
     const serviceTier = req?._serviceTier || null
 
-    const costs =
-      (await apiKeyService.recordUsage(
-        apiKeyData.id,
-        usageSummary.inputTokens,
-        usageSummary.outputTokens,
-        usageSummary.cacheCreateTokens,
-        usageSummary.cacheReadTokens,
-        modelToRecord,
-        account.id,
-        'openai-responses',
-        serviceTier,
-        createRequestDetailMeta(req, {
-          requestBody: req?._openaiCompatibleUpstreamBody || req?.body,
-          stream,
-          statusCode
-        })
-      )) || { realCost: 0, ratedCost: 0 }
+    const costs = (await apiKeyService.recordUsage(
+      apiKeyData.id,
+      usageSummary.inputTokens,
+      usageSummary.outputTokens,
+      usageSummary.cacheCreateTokens,
+      usageSummary.cacheReadTokens,
+      modelToRecord,
+      account.id,
+      'openai-responses',
+      serviceTier,
+      createRequestDetailMeta(req, {
+        requestBody: req?._openaiCompatibleUpstreamBody || req?.body,
+        stream,
+        statusCode
+      })
+    )) || { realCost: 0, ratedCost: 0 }
 
     if (usageData) {
       await this._applyRateLimitTracking(req, usageSummary, modelToRecord, costs, context)

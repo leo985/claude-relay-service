@@ -619,6 +619,16 @@
                       <span class="text-xs font-medium text-teal-700 dark:text-teal-400"
                         >API Key</span
                       >
+                      <span
+                        v-if="account.supportsImageGeneration"
+                        class="ml-1 rounded-full bg-cyan-100 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300"
+                      >
+                        {{
+                          account.imageBoundModel
+                            ? `Image API: ${account.imageBoundModel}`
+                            : 'Image API'
+                        }}
+                      </span>
                     </div>
                     <div
                       v-else-if="

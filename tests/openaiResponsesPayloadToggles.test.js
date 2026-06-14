@@ -112,6 +112,7 @@ const RESPONSES_REQUEST_FEATURES = {
   endpointKind: 'responses',
   hasTools: false,
   hasImages: false,
+  hasImageGeneration: false,
   hasReasoning: false,
   openaiResponsesOnly: false
 }

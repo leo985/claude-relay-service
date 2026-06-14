@@ -155,4 +155,36 @@ describe('CostCalculator', () => {
     expect(result.debug.usedFallbackPricing).toBe(false)
     expect(result.debug.pricingSource).toBe('dynamic')
   })
+
+  it('calculates image costs with image-token pricing fields', () => {
+    pricingService.getModelPricing.mockReturnValue({
+      input_cost_per_token: 0.000005,
+      input_cost_per_image_token: 0.000008,
+      output_cost_per_image_token: 0.000032,
+      cache_read_input_token_cost: 0.00000125,
+      cache_read_input_image_token_cost: 0.000002
+    })
+
+    const result = CostCalculator.calculateImageCost(
+      {
+        inputTextTokens: 100,
+        inputImageTokens: 200,
+        outputImageTokens: 300,
+        cacheReadTextTokens: 40,
+        cacheReadImageTokens: 50
+      },
+      'gpt-image-2'
+    )
+
+    expect(result.usingDynamicPricing).toBe(true)
+    expect(result.pricing.inputText).toBe(5)
+    expect(result.pricing.inputImage).toBe(8)
+    expect(result.pricing.outputImage).toBe(32)
+    expect(result.costs.inputText).toBeCloseTo(0.0005, 10)
+    expect(result.costs.inputImage).toBeCloseTo(0.0016, 10)
+    expect(result.costs.outputImage).toBeCloseTo(0.0096, 10)
+    expect(result.costs.cacheRead).toBeCloseTo(0.00015, 10)
+    expect(result.costs.total).toBeCloseTo(0.01185, 10)
+    expect(result.debug.usageKind).toBe('image')
+  })
 })

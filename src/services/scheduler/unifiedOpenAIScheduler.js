@@ -7,6 +7,7 @@ const { isSchedulable, sortAccountsByPriority } = require('../../utils/commonHel
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const {
   accountSupportsRequestFeatures,
+  getOpenAIImageModelRank,
   getOpenAIResponsesModelRank
 } = require('../../utils/openaiCompatible')
 
@@ -21,6 +22,9 @@ class UnifiedOpenAIScheduler {
       hasTools: requestFeatures.hasTools === true,
       hasImages: requestFeatures.hasImages === true,
       hasReasoning: requestFeatures.hasReasoning === true,
+      hasImageGeneration: requestFeatures.hasImageGeneration === true,
+      imageOperation: requestFeatures.imageOperation || '',
+      imageModel: requestFeatures.imageModel || null,
       openaiResponsesOnly: requestFeatures.openaiResponsesOnly === true
     }
   }
@@ -36,7 +40,10 @@ class UnifiedOpenAIScheduler {
       return { ok: true, reason: '', rank: 3 }
     }
 
-    const rank = getOpenAIResponsesModelRank(account, requestedModel)
+    const rank =
+      features.endpointKind === 'images'
+        ? getOpenAIImageModelRank(account, features.imageModel || requestedModel)
+        : getOpenAIResponsesModelRank(account, requestedModel)
     if (rank <= 0) {
       return { ok: false, reason: 'model_not_matched', rank }
     }

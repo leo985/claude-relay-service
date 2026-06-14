@@ -66,6 +66,9 @@ class OpenAIResponsesAccountService {
       supportsTools = true,
       supportsImages = false,
       supportsReasoning = false,
+      supportsImageGeneration = false,
+      imageBoundModel = '',
+      imageModelAliases = [],
       maxInputTokens = 0,
       maxOutputTokens = 0,
       customHeaders = {}
@@ -124,6 +127,9 @@ class OpenAIResponsesAccountService {
       supportsTools: this._normalizeBoolean(supportsTools, true),
       supportsImages: this._normalizeBoolean(supportsImages, false),
       supportsReasoning: this._normalizeBoolean(supportsReasoning, false),
+      supportsImageGeneration: this._normalizeBoolean(supportsImageGeneration, false),
+      imageBoundModel: this._normalizeBoundModel(imageBoundModel),
+      imageModelAliases: JSON.stringify(this._normalizeStringList(imageModelAliases)),
       maxInputTokens: this._normalizeNonNegativeInt(maxInputTokens).toString(),
       maxOutputTokens: this._normalizeNonNegativeInt(maxOutputTokens).toString(),
       customHeaders: this._encryptCustomHeaders(normalizedCustomHeaders)
@@ -224,6 +230,20 @@ class OpenAIResponsesAccountService {
     }
     if (updates.supportsReasoning !== undefined) {
       updates.supportsReasoning = this._normalizeBoolean(updates.supportsReasoning, false)
+    }
+    if (updates.supportsImageGeneration !== undefined) {
+      updates.supportsImageGeneration = this._normalizeBoolean(
+        updates.supportsImageGeneration,
+        false
+      )
+    }
+    if (updates.imageBoundModel !== undefined) {
+      updates.imageBoundModel = this._normalizeBoundModel(updates.imageBoundModel)
+    }
+    if (updates.imageModelAliases !== undefined) {
+      updates.imageModelAliases = JSON.stringify(
+        this._normalizeStringList(updates.imageModelAliases)
+      )
     }
     if (updates.maxInputTokens !== undefined) {
       updates.maxInputTokens = this._normalizeNonNegativeInt(updates.maxInputTokens).toString()
@@ -766,6 +786,10 @@ class OpenAIResponsesAccountService {
     accountData.supportsTools = accountData.supportsTools !== 'false'
     accountData.supportsImages = accountData.supportsImages === 'true'
     accountData.supportsReasoning = accountData.supportsReasoning === 'true'
+    accountData.supportsImageGeneration =
+      accountData.supportsImageGeneration === true || accountData.supportsImageGeneration === 'true'
+    accountData.imageBoundModel = accountData.imageBoundModel || ''
+    accountData.imageModelAliases = this._normalizeStringList(accountData.imageModelAliases)
     accountData.maxInputTokens = parseInt(accountData.maxInputTokens, 10) || 0
     accountData.maxOutputTokens = parseInt(accountData.maxOutputTokens, 10) || 0
 

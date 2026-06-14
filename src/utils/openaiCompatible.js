@@ -53,6 +53,14 @@ function detectEndpointKindFromPath(path = '') {
     return 'chat_completions'
   }
   if (
+    path === '/v1/images/generations' ||
+    path === '/images/generations' ||
+    path === '/v1/images/edits' ||
+    path === '/images/edits'
+  ) {
+    return 'images'
+  }
+  if (
     path === '/responses' ||
     path === '/v1/responses' ||
     path === '/responses/compact' ||
@@ -114,6 +122,15 @@ function containsReasoningPayload(body = {}) {
   return false
 }
 
+function containsImageGenerationTool(body = {}) {
+  if (!body || typeof body !== 'object') {
+    return false
+  }
+
+  const tools = Array.isArray(body.tools) ? body.tools : []
+  return tools.some((tool) => tool && tool.type === 'image_generation')
+}
+
 function getRequestFeaturesFromBody(body = {}, endpointKind = null) {
   return {
     endpointKind: endpointKind || detectEndpointKindFromPath(''),
@@ -122,7 +139,21 @@ function getRequestFeaturesFromBody(body = {}, endpointKind = null) {
       body.tool_choice !== undefined ||
       body.parallel_tool_calls !== undefined,
     hasImages: containsImagePayload(body.messages || body.input || body),
-    hasReasoning: containsReasoningPayload(body)
+    hasReasoning: containsReasoningPayload(body),
+    hasImageGeneration: containsImageGenerationTool(body)
+  }
+}
+
+function getRequestFeaturesForImages(body = {}, options = {}) {
+  return {
+    endpointKind: 'images',
+    hasTools: false,
+    hasImages: false,
+    hasReasoning: false,
+    hasImageGeneration: true,
+    imageOperation: options.operation || 'generations',
+    imageModel: body?.model || options.defaultModel || 'gpt-image-2',
+    openaiResponsesOnly: true
   }
 }
 
@@ -168,8 +199,32 @@ function getOpenAIResponsesModelRank(account = {}, requestedModel = null) {
   return 0
 }
 
+function getOpenAIImageModelRank(account = {}, requestedModel = null) {
+  const model = typeof requestedModel === 'string' ? requestedModel.trim() : ''
+  const boundModel =
+    typeof account.imageBoundModel === 'string' ? account.imageBoundModel.trim() : ''
+  const aliases = normalizeStringArray(account.imageModelAliases)
+
+  if (!model) {
+    return 1
+  }
+  if (boundModel && model === boundModel) {
+    return 3
+  }
+  if (aliases.includes(model)) {
+    return 2
+  }
+  if (!boundModel && aliases.length === 0) {
+    return 1
+  }
+  return 0
+}
+
 function endpointSupportsKind(providerEndpoint = 'responses', endpointKind = 'responses') {
   const protocol = getProviderProtocol(providerEndpoint)
+  if (endpointKind === 'images') {
+    return protocol === 'responses' || protocol === 'passthrough'
+  }
   if (endpointKind === 'responses') {
     return protocol === 'responses' || protocol === 'passthrough'
   }
@@ -196,6 +251,9 @@ function accountSupportsRequestFeatures(account = {}, features = {}) {
   if (features.hasReasoning && account.supportsReasoning !== true) {
     return { ok: false, reason: 'reasoning_not_supported' }
   }
+  if (features.hasImageGeneration && account.supportsImageGeneration !== true) {
+    return { ok: false, reason: 'image_generation_not_supported' }
+  }
   return { ok: true, reason: '' }
 }
 
@@ -214,8 +272,11 @@ module.exports = {
   detectEndpointKindFromPath,
   isOpenAINamespace,
   getRequestFeaturesFromBody,
+  getRequestFeaturesForImages,
+  containsImageGenerationTool,
   normalizeStringArray,
   getOpenAIResponsesModelRank,
+  getOpenAIImageModelRank,
   endpointSupportsKind,
   accountSupportsRequestFeatures,
   isValidHeaderName

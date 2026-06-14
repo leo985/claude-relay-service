@@ -1753,7 +1753,7 @@
                 </p>
               </div>
 
-              <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div class="grid grid-cols-1 gap-3 sm:grid-cols-4">
                 <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
                   <input v-model="form.supportsTools" type="checkbox" />
                   支持工具调用
@@ -1766,6 +1766,40 @@
                   <input v-model="form.supportsReasoning" type="checkbox" />
                   支持 reasoning
                 </label>
+                <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                  <input v-model="form.supportsImageGeneration" type="checkbox" />
+                  支持图片生成
+                </label>
+              </div>
+
+              <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                    >图片上游模型名（可选）</label
+                  >
+                  <input
+                    v-model="form.imageBoundModel"
+                    class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
+                    placeholder="例如 gpt-image-2；留空则透传客户端 model"
+                    type="text"
+                  />
+                  <p v-if="errors.imageBoundModel" class="mt-1 text-xs text-red-500">
+                    {{ errors.imageBoundModel }}
+                  </p>
+                </div>
+                <div>
+                  <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                    >图片模型别名（可选，每行一个）</label
+                  >
+                  <textarea
+                    v-model="form.imageModelAliasesText"
+                    class="form-input min-h-[88px] w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
+                    placeholder="例如：&#10;draw&#10;image"
+                  />
+                  <p v-if="errors.imageModelAliasesText" class="mt-1 text-xs text-red-500">
+                    {{ errors.imageModelAliasesText }}
+                  </p>
+                </div>
               </div>
 
               <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -3630,7 +3664,7 @@
               </p>
             </div>
 
-            <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-4">
               <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
                 <input v-model="form.supportsTools" type="checkbox" />
                 支持工具调用
@@ -3643,6 +3677,40 @@
                 <input v-model="form.supportsReasoning" type="checkbox" />
                 支持 reasoning
               </label>
+              <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                <input v-model="form.supportsImageGeneration" type="checkbox" />
+                支持图片生成
+              </label>
+            </div>
+
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300">
+                  图片上游模型名（可选）
+                </label>
+                <input
+                  v-model="form.imageBoundModel"
+                  class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                  placeholder="例如 gpt-image-2；留空则透传客户端 model"
+                  type="text"
+                />
+                <p v-if="errors.imageBoundModel" class="mt-1 text-xs text-red-500">
+                  {{ errors.imageBoundModel }}
+                </p>
+              </div>
+              <div>
+                <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300">
+                  图片模型别名（可选，每行一个）
+                </label>
+                <textarea
+                  v-model="form.imageModelAliasesText"
+                  class="form-input min-h-[88px] w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                  placeholder="例如：&#10;draw&#10;image"
+                />
+                <p v-if="errors.imageModelAliasesText" class="mt-1 text-xs text-red-500">
+                  {{ errors.imageModelAliasesText }}
+                </p>
+              </div>
             </div>
 
             <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -4630,6 +4698,11 @@ const form = ref({
   supportsTools: props.account?.supportsTools !== false,
   supportsImages: props.account?.supportsImages || false,
   supportsReasoning: props.account?.supportsReasoning || false,
+  supportsImageGeneration: props.account?.supportsImageGeneration || false,
+  imageBoundModel: props.account?.imageBoundModel || '',
+  imageModelAliasesText: Array.isArray(props.account?.imageModelAliases)
+    ? props.account.imageModelAliases.join('\n')
+    : '',
   maxInputTokens: props.account?.maxInputTokens || 0,
   maxOutputTokens: props.account?.maxOutputTokens || 0,
   customHeadersText: formatCustomHeadersForEdit(props.account?.customHeaders),
@@ -4727,6 +4800,8 @@ const validateOpenAIResponsesFields = ({ requireApiKey = false } = {}) => {
   errors.value.providerEndpoint = ''
   errors.value.boundModel = ''
   errors.value.modelAliasesText = ''
+  errors.value.imageBoundModel = ''
+  errors.value.imageModelAliasesText = ''
   errors.value.customHeadersText = ''
 
   if (!form.value.baseApi || form.value.baseApi.trim() === '') {
@@ -4745,9 +4820,18 @@ const validateOpenAIResponsesFields = ({ requireApiKey = false } = {}) => {
     errors.value.boundModel = '上游模型名不能包含换行或控制字符'
     hasError = true
   }
+  if (hasControlCharacters(form.value.imageBoundModel)) {
+    errors.value.imageBoundModel = '图片上游模型名不能包含换行或控制字符'
+    hasError = true
+  }
   const aliases = normalizeModelAliasText(form.value.modelAliasesText)
   if (aliases.some((alias) => hasControlCharacters(alias))) {
     errors.value.modelAliasesText = '模型别名不能包含控制字符'
+    hasError = true
+  }
+  const imageAliases = normalizeModelAliasText(form.value.imageModelAliasesText)
+  if (imageAliases.some((alias) => hasControlCharacters(alias))) {
+    errors.value.imageModelAliasesText = '图片模型别名不能包含控制字符'
     hasError = true
   }
 
@@ -4775,6 +4859,9 @@ const applyOpenAIResponsesPayload = (data, options = {}) => {
   data.supportsTools = !!form.value.supportsTools
   data.supportsImages = !!form.value.supportsImages
   data.supportsReasoning = !!form.value.supportsReasoning
+  data.supportsImageGeneration = !!form.value.supportsImageGeneration
+  data.imageBoundModel = form.value.imageBoundModel?.trim() || ''
+  data.imageModelAliases = normalizeModelAliasText(form.value.imageModelAliasesText)
   data.maxInputTokens = Math.max(0, Number(form.value.maxInputTokens) || 0)
   data.maxOutputTokens = Math.max(0, Number(form.value.maxOutputTokens) || 0)
   data.priority = form.value.priority || 50
@@ -4941,6 +5028,8 @@ const errors = ref({
   providerEndpoint: '',
   boundModel: '',
   modelAliasesText: '',
+  imageBoundModel: '',
+  imageModelAliasesText: '',
   customHeadersText: ''
 })
 
@@ -5614,6 +5703,8 @@ const createAccount = async () => {
   errors.value.providerEndpoint = ''
   errors.value.boundModel = ''
   errors.value.modelAliasesText = ''
+  errors.value.imageBoundModel = ''
+  errors.value.imageModelAliasesText = ''
   errors.value.customHeadersText = ''
 
   let hasError = false
@@ -6021,6 +6112,8 @@ const updateAccount = async () => {
   errors.value.providerEndpoint = ''
   errors.value.boundModel = ''
   errors.value.modelAliasesText = ''
+  errors.value.imageBoundModel = ''
+  errors.value.imageModelAliasesText = ''
   errors.value.customHeadersText = ''
 
   // 验证账户名称
@@ -6897,6 +6990,11 @@ watch(
         supportsTools: newAccount.supportsTools !== false,
         supportsImages: newAccount.supportsImages || false,
         supportsReasoning: newAccount.supportsReasoning || false,
+        supportsImageGeneration: newAccount.supportsImageGeneration || false,
+        imageBoundModel: newAccount.imageBoundModel || '',
+        imageModelAliasesText: Array.isArray(newAccount.imageModelAliases)
+          ? newAccount.imageModelAliases.join('\n')
+          : '',
         maxInputTokens: newAccount.maxInputTokens || 0,
         maxOutputTokens: newAccount.maxOutputTokens || 0,
         customHeadersText: formatCustomHeadersForEdit(newAccount.customHeaders),

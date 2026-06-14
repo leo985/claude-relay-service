@@ -1815,6 +1815,160 @@ class ApiKeyService {
     }
   }
 
+  // 📊 记录 OpenAI Images API 使用情况（使用 image-token 专用费用模型）
+  async recordImageUsage({
+    keyId,
+    imageUsage = {},
+    model = 'unknown',
+    accountId = null,
+    accountType = 'openai-responses',
+    requestMeta = null
+  } = {}) {
+    try {
+      const finalizedRequestMeta = finalizeRequestDetailMeta(requestMeta)
+      const toNumber = (value) => {
+        const parsed = Number(value)
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : 0
+      }
+
+      const inputTextTokens = toNumber(imageUsage.inputTextTokens)
+      const inputImageTokens = toNumber(imageUsage.inputImageTokens)
+      const outputImageTokens = toNumber(imageUsage.outputImageTokens)
+      const cacheReadTextTokens = toNumber(imageUsage.cacheReadTextTokens)
+      const cacheReadImageTokens = toNumber(imageUsage.cacheReadImageTokens)
+      const aggregateInputTokens = inputTextTokens + inputImageTokens
+      const aggregateOutputTokens = outputImageTokens
+      const aggregateCacheReadTokens = cacheReadTextTokens + cacheReadImageTokens
+      const calculatedTotalTokens =
+        aggregateInputTokens + aggregateOutputTokens + aggregateCacheReadTokens
+      const totalTokens = calculatedTotalTokens || toNumber(imageUsage.totalTokens)
+
+      const CostCalculator = require('../utils/costCalculator')
+      const costInfo = CostCalculator.calculateImageCost(
+        {
+          ...imageUsage,
+          inputTextTokens,
+          inputImageTokens,
+          outputImageTokens,
+          cacheReadTextTokens,
+          cacheReadImageTokens,
+          totalTokens
+        },
+        model
+      )
+
+      const realCost = Number(costInfo?.costs?.total || 0)
+      let ratedCost = realCost
+      if (realCost > 0) {
+        const service = serviceRatesService.getService(accountType, model)
+        ratedCost = await this.calculateRatedCost(keyId, service, realCost)
+      }
+
+      await redis.incrementTokenUsage(
+        keyId,
+        totalTokens,
+        aggregateInputTokens,
+        aggregateOutputTokens,
+        0,
+        aggregateCacheReadTokens,
+        model,
+        0,
+        0,
+        false,
+        realCost,
+        ratedCost
+      )
+
+      if (realCost > 0) {
+        await redis.incrementDailyCost(keyId, ratedCost, realCost)
+        logger.database(
+          `💰 Recorded image cost for ${keyId}: rated=$${ratedCost.toFixed(6)}, real=$${realCost.toFixed(6)}, model: ${model}`
+        )
+      } else {
+        logger.debug(`💰 No image cost recorded for ${keyId} - model: ${model}`)
+      }
+
+      const keyData = await redis.getApiKey(keyId)
+      if (keyData && Object.keys(keyData).length > 0) {
+        const lastUsedAt = new Date().toISOString()
+        keyData.lastUsedAt = lastUsedAt
+        await redis.setApiKey(keyId, keyData)
+
+        try {
+          const apiKeyIndexService = require('./apiKeyIndexService')
+          await apiKeyIndexService.updateLastUsedAt(keyId, lastUsedAt)
+        } catch (err) {
+          // 索引更新失败不影响主流程
+        }
+
+        if (accountId) {
+          await redis.incrementAccountUsage(
+            accountId,
+            totalTokens,
+            aggregateInputTokens,
+            aggregateOutputTokens,
+            0,
+            aggregateCacheReadTokens,
+            0,
+            0,
+            model,
+            false
+          )
+          logger.database(
+            `📊 Recorded image account usage: ${accountId} - ${totalTokens} tokens (API Key: ${keyId})`
+          )
+        }
+      }
+
+      const usageRecord = {
+        timestamp: new Date().toISOString(),
+        usageKind: 'image',
+        model,
+        accountId: accountId || null,
+        accountType: accountType || null,
+        requestId: finalizedRequestMeta?.requestId || null,
+        endpoint: finalizedRequestMeta?.endpoint || null,
+        method: finalizedRequestMeta?.method || null,
+        statusCode: finalizedRequestMeta?.statusCode || null,
+        stream: finalizedRequestMeta?.stream === true,
+        durationMs: finalizedRequestMeta?.durationMs ?? null,
+        inputTokens: aggregateInputTokens,
+        outputTokens: aggregateOutputTokens,
+        cacheCreateTokens: 0,
+        cacheReadTokens: aggregateCacheReadTokens,
+        totalTokens,
+        imageUsage: {
+          inputTextTokens,
+          inputImageTokens,
+          outputImageTokens,
+          cacheReadTextTokens,
+          cacheReadImageTokens
+        },
+        cost: Number(ratedCost.toFixed(6)),
+        realCost: Number(realCost.toFixed(6)),
+        costBreakdown: costInfo?.costs || undefined,
+        realCostBreakdown: costInfo?.costs || undefined,
+        pricingSource: costInfo?.debug?.pricingSource || null,
+        usedFallbackPricing: false,
+        isLongContext: false
+      }
+
+      await redis.addUsageRecord(keyId, usageRecord)
+      this._captureRequestDetail(keyId, usageRecord, finalizedRequestMeta).catch((captureError) => {
+        logger.warn(`⚠️ Failed to schedule request detail capture: ${captureError.message}`)
+      })
+
+      logger.database(
+        `📊 Recorded image usage: ${keyId} - Model: ${model}, Input: ${aggregateInputTokens}, OutputImage: ${aggregateOutputTokens}, CacheRead: ${aggregateCacheReadTokens}, Total: ${totalTokens}`
+      )
+
+      return { realCost, ratedCost, costInfo, totalTokens }
+    } catch (error) {
+      logger.error('❌ Failed to record image usage:', error)
+      return { realCost: 0, ratedCost: 0, costInfo: null, totalTokens: 0 }
+    }
+  }
+
   // 📊 记录 Opus 模型费用（仅限 claude 和 claude-console 账户，支持自定义重置周期）
   // ratedCost: 倍率后的成本（用于限额校验）
   // realCost: 真实成本（用于对账），如果不传则等于 ratedCost
