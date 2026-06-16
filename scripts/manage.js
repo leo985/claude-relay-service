@@ -140,7 +140,7 @@ class ServiceManager {
     if (!status.running) {
       console.log('⚠️  服务未在运行')
       this.removePidFile() // 清理可能存在的过期PID文件
-      return false
+      return Promise.resolve(false)
     }
 
     console.log(`🛑 停止服务 (PID: ${status.pid})...`)
@@ -150,48 +150,45 @@ class ServiceManager {
       process.kill(status.pid, 'SIGTERM')
 
       // 等待进程退出
-      let attempts = 0
-      const maxAttempts = 30 // 30秒超时
+      return new Promise((resolve) => {
+        let attempts = 0
+        const maxAttempts = 30 // 30秒超时
 
-      const checkExit = setInterval(() => {
-        attempts++
-        if (!this.isProcessRunning(status.pid)) {
-          clearInterval(checkExit)
-          console.log('✅ 服务已停止')
-          this.removePidFile()
-          return
-        }
-
-        if (attempts >= maxAttempts) {
-          clearInterval(checkExit)
-          console.log('⚠️  优雅关闭超时，强制终止进程...')
-          try {
-            process.kill(status.pid, 'SIGKILL')
-            console.log('✅ 服务已强制停止')
-          } catch (error) {
-            console.error('❌ 强制停止失败:', error.message)
+        const checkExit = setInterval(() => {
+          attempts++
+          if (!this.isProcessRunning(status.pid)) {
+            clearInterval(checkExit)
+            console.log('✅ 服务已停止')
+            this.removePidFile()
+            resolve(true)
+            return
           }
-          this.removePidFile()
-        }
-      }, 1000)
+
+          if (attempts >= maxAttempts) {
+            clearInterval(checkExit)
+            console.log('⚠️  优雅关闭超时，强制终止进程...')
+            try {
+              process.kill(status.pid, 'SIGKILL')
+              console.log('✅ 服务已强制停止')
+            } catch (error) {
+              console.error('❌ 强制停止失败:', error.message)
+            }
+            this.removePidFile()
+            resolve(true)
+          }
+        }, 1000)
+      })
     } catch (error) {
       console.error('❌ 停止服务失败:', error.message)
       this.removePidFile()
-      return false
+      return Promise.resolve(false)
     }
-
-    return true
   }
 
-  restart(daemon = false) {
+  async restart(daemon = false) {
     console.log('🔄 重启服务...')
-    this.stop()
-    // 等待停止完成
-    setTimeout(() => {
-      this.start(daemon)
-    }, 2000)
-
-    return true
+    await this.stop()
+    return this.start(daemon)
   }
 
   status() {
@@ -283,7 +280,7 @@ class ServiceManager {
 }
 
 // 主程序
-function main() {
+async function main() {
   const manager = new ServiceManager()
   const args = process.argv.slice(2)
   const command = args[0]
@@ -296,11 +293,11 @@ function main() {
       break
     case 'stop':
     case 'halt':
-      manager.stop()
+      await manager.stop()
       break
     case 'restart':
     case 'r':
-      manager.restart(isDaemon)
+      await manager.restart(isDaemon)
       break
     case 'status':
     case 'st':
@@ -327,7 +324,10 @@ function main() {
 }
 
 if (require.main === module) {
-  main()
+  main().catch((error) => {
+    console.error('❌ 服务管理命令执行失败:', error.message)
+    process.exit(1)
+  })
 }
 
 module.exports = ServiceManager

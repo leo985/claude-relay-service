@@ -97,7 +97,7 @@ function containsImagePayload(value) {
   }
 
   const type = typeof value.type === 'string' ? value.type : ''
-  if (type === 'image_url' || type === 'input_image') {
+  if (type === 'image_url' || type === 'input_image' || type === 'image') {
     return true
   }
   if (value.image_url || value.input_image) {

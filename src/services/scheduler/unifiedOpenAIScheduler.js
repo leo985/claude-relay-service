@@ -64,6 +64,40 @@ class UnifiedOpenAIScheduler {
     })
   }
 
+  _getSessionFeatureSnapshot(requestFeatures = {}) {
+    const features = this._normalizeRequestFeatures(requestFeatures)
+    return {
+      endpointKind: features.endpointKind || null,
+      openaiResponsesOnly: features.openaiResponsesOnly,
+      hasTools: features.hasTools,
+      hasImages: features.hasImages,
+      hasReasoning: features.hasReasoning,
+      hasImageGeneration: features.hasImageGeneration,
+      imageOperation: features.imageOperation || ''
+    }
+  }
+
+  _recordGroupSkip(skipReasons, memberId, accountType, account, reason) {
+    skipReasons.push({
+      accountId: account?.id || memberId,
+      accountType,
+      accountName: account?.name || '',
+      reason
+    })
+  }
+
+  _formatGroupSkipReasons(skipReasons) {
+    if (!skipReasons.length) {
+      return 'no members inspected'
+    }
+    return skipReasons
+      .map((item) => {
+        const name = item.accountName || item.accountId
+        return `${name}(${item.accountType}):${item.reason}`
+      })
+      .join('; ')
+  }
+
   // 🔧 辅助方法：检查账户是否被限流（兼容字符串和对象格式）
   _isRateLimited(rateLimitStatus) {
     if (!rateLimitStatus) {
@@ -359,7 +393,7 @@ class UnifiedOpenAIScheduler {
             !this._doesSessionMappingMatchRequest(mappedAccount, requestedModel, requestFeatures)
           ) {
             logger.warn(
-              `⚠️ Sticky session account ${mappedAccount.accountId} does not match current model or endpoint, selecting new account`
+              `⚠️ Sticky session account ${mappedAccount.accountId} does not match current model, endpoint, or request features, selecting new account`
             )
             await this._deleteSessionMapping(sessionHash)
           } else {
@@ -736,6 +770,26 @@ class UnifiedOpenAIScheduler {
     ) {
       return false
     }
+    for (const key of [
+      'openaiResponsesOnly',
+      'hasTools',
+      'hasImages',
+      'hasReasoning',
+      'hasImageGeneration'
+    ]) {
+      if (
+        Object.prototype.hasOwnProperty.call(mappedAccount, key) &&
+        Boolean(mappedAccount[key]) !== Boolean(features[key])
+      ) {
+        return false
+      }
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(mappedAccount, 'imageOperation') &&
+      String(mappedAccount.imageOperation || '') !== String(features.imageOperation || '')
+    ) {
+      return false
+    }
     return true
   }
 
@@ -770,7 +824,7 @@ class UnifiedOpenAIScheduler {
       accountId,
       accountType,
       modelKey: requestedModel || null,
-      endpointKind: features.endpointKind || null
+      ...this._getSessionFeatureSnapshot(features)
     })
     // 依据配置设置TTL（小时）
     const appConfig = require('../../../config/config')
@@ -1075,6 +1129,7 @@ class UnifiedOpenAIScheduler {
 
       // 获取可用的分组成员账户（支持 OpenAI 和 OpenAI-Responses 两种类型）
       const availableAccounts = []
+      const skipReasons = []
       for (const memberId of memberIds) {
         // 首先尝试从 OpenAI 账户服务获取
         let account = await openaiAccountService.getAccount(memberId)
@@ -1086,124 +1141,187 @@ class UnifiedOpenAIScheduler {
           accountType = 'openai-responses'
         }
 
-        if (requestFeatures.openaiResponsesOnly && accountType !== 'openai-responses') {
+        if (!account) {
+          this._recordGroupSkip(skipReasons, memberId, accountType, account, 'account_not_found')
           continue
         }
 
-        if (
-          account &&
-          (account.isActive === true || account.isActive === 'true') &&
-          account.status !== 'error'
-        ) {
-          let readiness = { canUse: true }
-          if (accountType === 'openai') {
-            readiness = await this._ensureAccountReadyForScheduling(account, account.id, {
-              sanitized: false
-            })
-          } else if (!isSchedulable(account.schedulable)) {
-            const hasRateLimitFlag =
-              this._hasRateLimitFlag(account.rateLimitStatus) || account.status === 'rateLimited'
-            if (hasRateLimitFlag) {
-              const isRateLimitCleared = await openaiResponsesAccountService.checkAndClearRateLimit(
-                account.id
-              )
-              readiness = {
-                canUse: isRateLimitCleared,
-                reason: isRateLimitCleared ? '' : 'rate_limited'
-              }
-            } else {
-              readiness = { canUse: false, reason: 'not_schedulable' }
-            }
-          }
-
-          if (!readiness.canUse) {
-            if (readiness.reason === 'rate_limited') {
-              logger.debug(
-                `⏭️ Skipping group member ${accountType} account ${account.name} - still rate limited`
-              )
-            } else {
-              logger.debug(
-                `⏭️ Skipping group member ${accountType} account ${account.name} - not schedulable`
-              )
-            }
-            continue
-          }
-
-          const isTempUnavailable = await upstreamErrorHelper.isTempUnavailable(
-            account.id,
-            accountType
-          )
-          if (isTempUnavailable) {
-            logger.debug(
-              `⏭️ Skipping group member ${accountType} account ${account.name} - temporarily unavailable`
-            )
-            continue
-          }
-
-          // 检查token是否过期（仅对 OpenAI OAuth 账户检查）
-          if (accountType === 'openai') {
-            const isExpired = openaiAccountService.isTokenExpired(account)
-            if (isExpired && !account.refreshToken) {
-              logger.warn(
-                `⚠️ Group member OpenAI account ${account.name} token expired and no refresh token available`
-              )
-              continue
-            }
-          }
-
-          // 检查模型支持（普通 OpenAI 账号保持原 supportedModels 语义）
-          if (
-            accountType === 'openai' &&
-            requestedModel &&
-            account.supportedModels &&
-            account.supportedModels.length > 0
-          ) {
-            const modelSupported = account.supportedModels.includes(requestedModel)
-            if (!modelSupported) {
-              logger.debug(
-                `⏭️ Skipping group member ${accountType} account ${account.name} - doesn't support model ${requestedModel}`
-              )
-              continue
-            }
-          }
-
-          let modelMatchRank = 0
-          if (accountType === 'openai-responses') {
-            if (openaiResponsesAccountService.isSubscriptionExpired(account)) {
-              logger.debug(
-                `⏭️ Skipping group member OpenAI-Responses account ${account.name} - subscription expired`
-              )
-              continue
-            }
-            const compatibility = this._rankOpenAIResponsesAccount(
-              account,
-              requestedModel,
-              requestFeatures
-            )
-            if (!compatibility.ok) {
-              logger.debug(
-                `⏭️ Skipping group member OpenAI-Responses account ${account.name} - ${compatibility.reason}`
-              )
-              continue
-            }
-            modelMatchRank = compatibility.rank
-          }
-
-          // 添加到可用账户列表
-          availableAccounts.push({
-            ...account,
-            accountId: account.id,
+        if (requestFeatures.openaiResponsesOnly && accountType !== 'openai-responses') {
+          this._recordGroupSkip(
+            skipReasons,
+            memberId,
             accountType,
-            priority: parseInt(account.priority) || 50,
-            lastUsedAt: account.lastUsedAt || '0',
-            modelMatchRank
-          })
+            account,
+            'openai_responses_required'
+          )
+          continue
         }
+
+        if (account.isActive !== true && account.isActive !== 'true') {
+          this._recordGroupSkip(skipReasons, memberId, accountType, account, 'inactive')
+          continue
+        }
+
+        if (account.status === 'error' || account.status === 'unauthorized') {
+          this._recordGroupSkip(
+            skipReasons,
+            memberId,
+            accountType,
+            account,
+            account.status || 'error'
+          )
+          continue
+        }
+
+        let readiness = { canUse: true }
+        if (accountType === 'openai') {
+          readiness = await this._ensureAccountReadyForScheduling(account, account.id, {
+            sanitized: false
+          })
+        } else if (!isSchedulable(account.schedulable)) {
+          const hasRateLimitFlag =
+            this._hasRateLimitFlag(account.rateLimitStatus) || account.status === 'rateLimited'
+          if (hasRateLimitFlag) {
+            const isRateLimitCleared = await openaiResponsesAccountService.checkAndClearRateLimit(
+              account.id
+            )
+            readiness = {
+              canUse: isRateLimitCleared,
+              reason: isRateLimitCleared ? '' : 'rate_limited'
+            }
+          } else {
+            readiness = { canUse: false, reason: 'not_schedulable' }
+          }
+        }
+
+        if (!readiness.canUse) {
+          if (readiness.reason === 'rate_limited') {
+            logger.debug(
+              `⏭️ Skipping group member ${accountType} account ${account.name} - still rate limited`
+            )
+          } else {
+            logger.debug(
+              `⏭️ Skipping group member ${accountType} account ${account.name} - not schedulable`
+            )
+          }
+          this._recordGroupSkip(
+            skipReasons,
+            memberId,
+            accountType,
+            account,
+            readiness.reason || 'not_schedulable'
+          )
+          continue
+        }
+
+        const isTempUnavailable = await upstreamErrorHelper.isTempUnavailable(
+          account.id,
+          accountType
+        )
+        if (isTempUnavailable) {
+          logger.debug(
+            `⏭️ Skipping group member ${accountType} account ${account.name} - temporarily unavailable`
+          )
+          this._recordGroupSkip(
+            skipReasons,
+            memberId,
+            accountType,
+            account,
+            'temporarily_unavailable'
+          )
+          continue
+        }
+
+        // 检查token是否过期（仅对 OpenAI OAuth 账户检查）
+        if (accountType === 'openai') {
+          const isExpired = openaiAccountService.isTokenExpired(account)
+          if (isExpired && !account.refreshToken) {
+            logger.warn(
+              `⚠️ Group member OpenAI account ${account.name} token expired and no refresh token available`
+            )
+            this._recordGroupSkip(skipReasons, memberId, accountType, account, 'token_expired')
+            continue
+          }
+        }
+
+        // 检查模型支持（普通 OpenAI 账号保持原 supportedModels 语义）
+        if (
+          accountType === 'openai' &&
+          requestedModel &&
+          account.supportedModels &&
+          account.supportedModels.length > 0
+        ) {
+          const modelSupported = account.supportedModels.includes(requestedModel)
+          if (!modelSupported) {
+            logger.debug(
+              `⏭️ Skipping group member ${accountType} account ${account.name} - doesn't support model ${requestedModel}`
+            )
+            this._recordGroupSkip(
+              skipReasons,
+              memberId,
+              accountType,
+              account,
+              `model_not_supported:${requestedModel}`
+            )
+            continue
+          }
+        }
+
+        let modelMatchRank = 0
+        if (accountType === 'openai-responses') {
+          if (openaiResponsesAccountService.isSubscriptionExpired(account)) {
+            logger.debug(
+              `⏭️ Skipping group member OpenAI-Responses account ${account.name} - subscription expired`
+            )
+            this._recordGroupSkip(
+              skipReasons,
+              memberId,
+              accountType,
+              account,
+              'subscription_expired'
+            )
+            continue
+          }
+          const compatibility = this._rankOpenAIResponsesAccount(
+            account,
+            requestedModel,
+            requestFeatures
+          )
+          if (!compatibility.ok) {
+            logger.debug(
+              `⏭️ Skipping group member OpenAI-Responses account ${account.name} - ${compatibility.reason}`
+            )
+            this._recordGroupSkip(
+              skipReasons,
+              memberId,
+              accountType,
+              account,
+              compatibility.reason || 'incompatible'
+            )
+            continue
+          }
+          modelMatchRank = compatibility.rank
+        }
+
+        // 添加到可用账户列表
+        availableAccounts.push({
+          ...account,
+          accountId: account.id,
+          accountType,
+          priority: parseInt(account.priority) || 50,
+          lastUsedAt: account.lastUsedAt || '0',
+          modelMatchRank
+        })
       }
 
       if (availableAccounts.length === 0) {
+        const skipReasonText = this._formatGroupSkipReasons(skipReasons)
+        logger.warn(
+          `⚠️ No available accounts in OpenAI group ${group.name} for model ${requestedModel || 'unspecified'} (${requestFeatures.endpointKind}); skipped: ${skipReasonText}`
+        )
         const error = new Error(`No available accounts in group ${group.name}`)
         error.statusCode = 402 // Payment Required - 资源耗尽
+        error.skipReasons = skipReasons
         throw error
       }
 

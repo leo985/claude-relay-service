@@ -1634,7 +1634,7 @@
               </div>
 
               <TempUnavailablePolicyFields
-                v-if="form.platform === 'claude'"
+                v-if="tempUnavailablePolicyPlatforms.includes(form.platform)"
                 v-model:disable-temp-unavailable="form.disableTempUnavailable"
                 v-model:temp-unavailable-503-ttl-seconds="form.tempUnavailable503TtlSeconds"
                 v-model:temp-unavailable-5xx-ttl-seconds="form.tempUnavailable5xxTtlSeconds"
@@ -3560,7 +3560,7 @@
           </div>
 
           <TempUnavailablePolicyFields
-            v-if="form.platform === 'claude'"
+            v-if="tempUnavailablePolicyPlatforms.includes(form.platform)"
             v-model:disable-temp-unavailable="form.disableTempUnavailable"
             v-model:temp-unavailable-503-ttl-seconds="form.tempUnavailable503TtlSeconds"
             v-model:temp-unavailable-5xx-ttl-seconds="form.tempUnavailable5xxTtlSeconds"
@@ -4392,6 +4392,8 @@ const autoProtectionPlatforms = [
   'openai-responses'
 ]
 
+const tempUnavailablePolicyPlatforms = ['claude', 'openai-responses']
+
 // OAuthFlow 组件引用
 const oauthFlowRef = ref(null)
 
@@ -4875,7 +4877,7 @@ const applyOpenAIResponsesPayload = (data, options = {}) => {
   return data
 }
 
-const buildClaudeTempUnavailablePolicyPayload = () => ({
+const buildTempUnavailablePolicyPayload = () => ({
   disableTempUnavailable: !!form.value.disableTempUnavailable,
   tempUnavailable503TtlSeconds: normalizeAccountCooldownOverride(
     form.value.tempUnavailable503TtlSeconds
@@ -5555,7 +5557,7 @@ const handleOAuthSuccess = async (tokenInfoOrList) => {
       data.useUnifiedClientId = form.value.useUnifiedClientId || false
       data.unifiedClientId = form.value.unifiedClientId || ''
       data.maxConcurrency = form.value.serialQueueEnabled ? 1 : 0
-      Object.assign(data, buildClaudeTempUnavailablePolicyPayload())
+      Object.assign(data, buildTempUnavailablePolicyPayload())
       // 添加订阅类型信息
       data.subscriptionInfo = {
         accountType: form.value.subscriptionType || 'claude_max',
@@ -5995,6 +5997,7 @@ const createAccount = async () => {
     } else if (form.value.platform === 'openai-responses') {
       // OpenAI-Responses 账户特定数据
       applyOpenAIResponsesPayload(data)
+      Object.assign(data, buildTempUnavailablePolicyPayload())
       data.rateLimitDuration = 60 // 默认值60，不从用户输入获取
     } else if (form.value.platform === 'gemini-antigravity') {
       // Antigravity OAuth - set oauthProvider, submission happens below
@@ -6309,7 +6312,7 @@ const updateAccount = async () => {
       data.useUnifiedClientId = form.value.useUnifiedClientId || false
       data.unifiedClientId = form.value.unifiedClientId || ''
       data.maxConcurrency = form.value.serialQueueEnabled ? 1 : 0
-      Object.assign(data, buildClaudeTempUnavailablePolicyPayload())
+      Object.assign(data, buildTempUnavailablePolicyPayload())
       // 更新订阅类型信息
       data.subscriptionInfo = {
         accountType: form.value.subscriptionType || 'claude_max',
@@ -6355,6 +6358,7 @@ const updateAccount = async () => {
         includeApiKey: !!form.value.apiKey,
         includeCustomHeaders: false
       })
+      Object.assign(data, buildTempUnavailablePolicyPayload())
       if (clearCustomHeadersRequested.value) {
         data.customHeaders = {}
       } else if (

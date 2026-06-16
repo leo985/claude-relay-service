@@ -5,6 +5,7 @@ const bedrockRelayService = require('../services/relay/bedrockRelayService')
 const ccrRelayService = require('../services/relay/ccrRelayService')
 const bedrockAccountService = require('../services/account/bedrockAccountService')
 const unifiedClaudeScheduler = require('../services/scheduler/unifiedClaudeScheduler')
+const unifiedOpenAIScheduler = require('../services/scheduler/unifiedOpenAIScheduler')
 const apiKeyService = require('../services/apiKeyService')
 const { authenticateApiKey } = require('../middleware/auth')
 const logger = require('../utils/logger')
@@ -28,6 +29,7 @@ const {
   handleAnthropicMessagesToGemini,
   handleAnthropicCountTokensToGemini
 } = require('../services/anthropicGeminiBridgeService')
+const { getRequestFeaturesFromBody } = require('../utils/openaiCompatible')
 const router = express.Router()
 
 function queueRateLimitUpdate(
@@ -133,6 +135,66 @@ function isOldSession(body) {
   }
 
   return false
+}
+
+function hasOpenAIResponsesFallbackBinding(apiKeyData) {
+  const binding = apiKeyData?.openaiAccountId || ''
+  return binding.startsWith('responses:') || binding.startsWith('group:')
+}
+
+function getAnthropicPassthroughFeatures(body = {}) {
+  const features = getRequestFeaturesFromBody(body, 'passthrough')
+  return {
+    ...features,
+    endpointKind: 'passthrough',
+    hasReasoning: features.hasReasoning || body.thinking !== undefined,
+    openaiResponsesOnly: true
+  }
+}
+
+async function fallbackToOpenAIResponses({ req, res, sessionHash, requestedModel, context = '' }) {
+  if (!hasOpenAIResponsesFallbackBinding(req.apiKey)) {
+    return false
+  }
+
+  const label = context ? ` ${context}` : ''
+  try {
+    logger.info(
+      `🔀${label} Attempting OpenAI-Responses fallback for /v1/messages via ${req.apiKey.openaiAccountId}`
+    )
+
+    const selection = await unifiedOpenAIScheduler.selectAccountForApiKey(
+      req.apiKey,
+      sessionHash,
+      requestedModel,
+      getAnthropicPassthroughFeatures(req.body)
+    )
+
+    if (!selection?.accountId || selection.accountType !== 'openai-responses') {
+      const error = new Error('OpenAI-Responses fallback did not select a compatible account')
+      error.statusCode = 402
+      throw error
+    }
+
+    const responsesAccount = await openaiResponsesAccountService.getAccount(selection.accountId)
+    if (!responsesAccount) {
+      const error = new Error(`OpenAI-Responses account ${selection.accountId} not found`)
+      error.statusCode = 404
+      throw error
+    }
+
+    logger.info(
+      `🔀${label} Falling back to OpenAI-Responses account: ${responsesAccount.name} (${selection.accountId}) for /v1/messages`
+    )
+    await openaiResponsesRelayService.handleRequest(req, res, responsesAccount, req.apiKey)
+    return true
+  } catch (fallbackError) {
+    logger.error(`❌${label} Fallback to OpenAI-Responses failed: ${fallbackError.message}`)
+    if (res.headersSent) {
+      throw fallbackError
+    }
+    return false
+  }
 }
 
 // 🔧 共享的消息处理函数
@@ -378,24 +440,17 @@ async function handleMessagesRequest(req, res) {
           return
         }
 
-        // Fallback: 当没有 Claude 账号可用时，尝试 OpenAI Responses 账号（passthrough 模式）
-        if (
-          error.message &&
-          error.message.includes('No available Claude accounts') &&
-          req.apiKey?.openaiAccountId?.startsWith('responses:')
-        ) {
-          const responsesAccountId = req.apiKey.openaiAccountId.replace('responses:', '')
-          logger.info(`🔀 Attempting fallback to OpenAI Responses account: ${responsesAccountId} for /v1/messages`)
-          try {
-            const responsesAccount = await openaiResponsesAccountService.getAccount(responsesAccountId)
-            if (responsesAccount && responsesAccount.isActive !== false && responsesAccount.status !== 'error') {
-              logger.info(`🔀 Falling back to OpenAI Responses account: ${responsesAccount.name} (passthrough) for /v1/messages`)
-              return await openaiResponsesRelayService.handleRequest(req, res, responsesAccount, req.apiKey)
-            } else {
-              logger.warn(`🔀 Fallback account ${responsesAccountId} not available: active=${responsesAccount?.isActive}, status=${responsesAccount?.status}`)
-            }
-          } catch (fallbackError) {
-            logger.error(`❌ Fallback to OpenAI Responses failed: ${fallbackError.message}`)
+        // Fallback: 当没有 Claude 账号可用时，尝试 OpenAI-Responses 账号或分组（passthrough 模式）
+        if (error.message && error.message.includes('No available Claude accounts')) {
+          const didFallback = await fallbackToOpenAIResponses({
+            req,
+            res,
+            sessionHash,
+            requestedModel,
+            context: '[Stream]'
+          })
+          if (didFallback) {
+            return
           }
         }
 
@@ -1105,24 +1160,17 @@ async function handleMessagesRequest(req, res) {
           })
         }
 
-        // Fallback: 当没有 Claude 账号可用时，尝试 OpenAI Responses 账号（passthrough 模式）
-        if (
-          error.message &&
-          error.message.includes('No available Claude accounts') &&
-          req.apiKey?.openaiAccountId?.startsWith('responses:')
-        ) {
-          const responsesAccountId = req.apiKey.openaiAccountId.replace('responses:', '')
-          logger.info(`🔀 [Non-stream] Attempting fallback to OpenAI Responses account: ${responsesAccountId} for /v1/messages`)
-          try {
-            const responsesAccount = await openaiResponsesAccountService.getAccount(responsesAccountId)
-            if (responsesAccount && responsesAccount.isActive !== false && responsesAccount.status !== 'error') {
-              logger.info(`🔀 [Non-stream] Falling back to OpenAI Responses account: ${responsesAccount.name} (passthrough) for /v1/messages`)
-              return await openaiResponsesRelayService.handleRequest(req, res, responsesAccount, req.apiKey)
-            } else {
-              logger.warn(`🔀 [Non-stream] Fallback account ${responsesAccountId} not available: active=${responsesAccount?.isActive}, status=${responsesAccount?.status}`)
-            }
-          } catch (fallbackError) {
-            logger.error(`❌ [Non-stream] Fallback to OpenAI Responses failed: ${fallbackError.message}`)
+        // Fallback: 当没有 Claude 账号可用时，尝试 OpenAI-Responses 账号或分组（passthrough 模式）
+        if (error.message && error.message.includes('No available Claude accounts')) {
+          const didFallback = await fallbackToOpenAIResponses({
+            req,
+            res,
+            sessionHash,
+            requestedModel,
+            context: '[Non-stream]'
+          })
+          if (didFallback) {
+            return
           }
         }
 
@@ -1477,8 +1525,11 @@ async function handleMessagesRequest(req, res) {
       // 根据错误类型设置适当的状态码
       let statusCode = 500
       let errorType = 'Relay service error'
+      const { statusCode: handledStatusCode } = handledError
 
-      if (
+      if (Number.isInteger(handledStatusCode) && handledStatusCode >= 400) {
+        statusCode = handledStatusCode
+      } else if (
         handledError.message.includes('Connection reset') ||
         handledError.message.includes('socket hang up')
       ) {

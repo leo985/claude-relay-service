@@ -118,4 +118,48 @@ describe('UnifiedOpenAIScheduler', () => {
       expect(result.rank).toBe(3)
     })
   })
+
+  describe('_doesSessionMappingMatchRequest request features', () => {
+    it('does not reuse an image sticky mapping for a text-only request', () => {
+      expect(
+        unifiedOpenAIScheduler._doesSessionMappingMatchRequest(
+          {
+            accountId: 'vision-account',
+            accountType: 'openai-responses',
+            modelKey: 'GLM-5.2',
+            endpointKind: 'passthrough',
+            openaiResponsesOnly: true,
+            hasImages: true
+          },
+          'GLM-5.2',
+          {
+            endpointKind: 'passthrough',
+            openaiResponsesOnly: true,
+            hasImages: false
+          }
+        )
+      ).toBe(false)
+    })
+
+    it('does not reuse a text sticky mapping for an image request', () => {
+      expect(
+        unifiedOpenAIScheduler._doesSessionMappingMatchRequest(
+          {
+            accountId: 'text-account',
+            accountType: 'openai-responses',
+            modelKey: 'GLM-5.2',
+            endpointKind: 'passthrough',
+            openaiResponsesOnly: true,
+            hasImages: false
+          },
+          'GLM-5.2',
+          {
+            endpointKind: 'passthrough',
+            openaiResponsesOnly: true,
+            hasImages: true
+          }
+        )
+      ).toBe(false)
+    })
+  })
 })

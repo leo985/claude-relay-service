@@ -61,7 +61,9 @@ const getRedis = () => {
 // 可读取账号级临时暂停配置的 Redis key 前缀映射
 const ACCOUNT_KEY_PREFIX_BY_TYPE = {
   'claude-official': 'claude:account:',
-  claude: 'claude:account:'
+  claude: 'claude:account:',
+  openai: 'openai:account:',
+  'openai-responses': 'openai_responses_account:'
 }
 
 const EMPTY_TEMP_UNAVAILABLE_POLICY = {

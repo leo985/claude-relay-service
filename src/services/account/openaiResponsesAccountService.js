@@ -13,6 +13,7 @@ const {
   normalizeStringArray,
   validateProviderEndpoint
 } = require('../../utils/openaiCompatible')
+const { normalizeOptionalNonNegativeInteger } = require('../../utils/tempUnavailablePolicy')
 
 class OpenAIResponsesAccountService {
   constructor() {
@@ -60,6 +61,9 @@ class OpenAIResponsesAccountService {
       quotaResetTime = '00:00', // 额度重置时间（HH:mm格式）
       rateLimitDuration = 60, // 限流时间（分钟）
       disableAutoProtection = false, // 是否关闭自动防护（429/401/400/529 不自动禁用）
+      disableTempUnavailable = false, // 是否禁用账号级临时冷却
+      tempUnavailable503TtlSeconds = null, // 账号级 503 冷却秒数（null 跟随全局）
+      tempUnavailable5xxTtlSeconds = null, // 账号级 5xx 冷却秒数（null 跟随全局）
       providerEndpoint = 'responses', // Provider 端点类型
       boundModel = '',
       modelAliases = [],
@@ -121,6 +125,13 @@ class OpenAIResponsesAccountService {
       quotaResetTime,
       quotaStoppedAt: '',
       disableAutoProtection: this._normalizeBoolean(disableAutoProtection, false), // 关闭自动防护
+      disableTempUnavailable: this._normalizeBoolean(disableTempUnavailable, false),
+      tempUnavailable503TtlSeconds: this._normalizeOptionalNonNegativeInt(
+        tempUnavailable503TtlSeconds
+      ),
+      tempUnavailable5xxTtlSeconds: this._normalizeOptionalNonNegativeInt(
+        tempUnavailable5xxTtlSeconds
+      ),
       providerEndpoint,
       boundModel: this._normalizeBoundModel(boundModel),
       modelAliases: JSON.stringify(this._normalizeStringList(modelAliases)),
@@ -212,6 +223,19 @@ class OpenAIResponsesAccountService {
     // 自动防护开关
     if (updates.disableAutoProtection !== undefined) {
       updates.disableAutoProtection = this._normalizeBoolean(updates.disableAutoProtection, false)
+    }
+    if (updates.disableTempUnavailable !== undefined) {
+      updates.disableTempUnavailable = this._normalizeBoolean(updates.disableTempUnavailable, false)
+    }
+    if (updates.tempUnavailable503TtlSeconds !== undefined) {
+      updates.tempUnavailable503TtlSeconds = this._normalizeOptionalNonNegativeInt(
+        updates.tempUnavailable503TtlSeconds
+      )
+    }
+    if (updates.tempUnavailable5xxTtlSeconds !== undefined) {
+      updates.tempUnavailable5xxTtlSeconds = this._normalizeOptionalNonNegativeInt(
+        updates.tempUnavailable5xxTtlSeconds
+      )
     }
 
     if (updates.boundModel !== undefined) {
@@ -669,6 +693,11 @@ class OpenAIResponsesAccountService {
     return Math.floor(parsed)
   }
 
+  _normalizeOptionalNonNegativeInt(value) {
+    const parsed = normalizeOptionalNonNegativeInteger(value)
+    return parsed !== null ? parsed.toString() : ''
+  }
+
   _normalizeStringList(value) {
     const items = normalizeStringArray(value)
     const seen = new Set()
@@ -792,6 +821,14 @@ class OpenAIResponsesAccountService {
     accountData.imageModelAliases = this._normalizeStringList(accountData.imageModelAliases)
     accountData.maxInputTokens = parseInt(accountData.maxInputTokens, 10) || 0
     accountData.maxOutputTokens = parseInt(accountData.maxOutputTokens, 10) || 0
+    accountData.disableTempUnavailable =
+      accountData.disableTempUnavailable === true || accountData.disableTempUnavailable === 'true'
+    accountData.tempUnavailable503TtlSeconds = normalizeOptionalNonNegativeInteger(
+      accountData.tempUnavailable503TtlSeconds
+    )
+    accountData.tempUnavailable5xxTtlSeconds = normalizeOptionalNonNegativeInteger(
+      accountData.tempUnavailable5xxTtlSeconds
+    )
 
     const decryptedHeaders = this._decryptCustomHeaders(accountData.customHeaders)
     accountData.customHeaders = options.includeSecretHeaders

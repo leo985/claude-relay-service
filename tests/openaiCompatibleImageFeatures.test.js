@@ -36,6 +36,39 @@ describe('openaiCompatible image features', () => {
     ).toEqual({ ok: false, reason: 'image_generation_not_supported' })
   })
 
+  test('detects Anthropic image content blocks in passthrough requests', () => {
+    const features = getRequestFeaturesFromBody(
+      {
+        model: 'GLM-5.2',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'describe this image' },
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: 'image/png',
+                  data: 'abc'
+                }
+              }
+            ]
+          }
+        ]
+      },
+      'passthrough'
+    )
+
+    expect(features.hasImages).toBe(true)
+    expect(
+      accountSupportsRequestFeatures(
+        { providerEndpoint: 'passthrough', supportsImages: false },
+        features
+      )
+    ).toEqual({ ok: false, reason: 'images_not_supported' })
+  })
+
   test('builds explicit features for Images API requests', () => {
     expect(
       getRequestFeaturesForImages({ model: 'gpt-image-2' }, { operation: 'edits' })
