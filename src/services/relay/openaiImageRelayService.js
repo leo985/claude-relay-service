@@ -9,22 +9,8 @@ const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const { createRequestDetailMeta } = require('../../utils/requestDetailHelper')
 const { updateRateLimitCounters } = require('../../utils/rateLimitHelper')
 const { RESERVED_CUSTOM_HEADERS, clonePlainObject } = require('../../utils/openaiCompatible')
+const { extractImageUsage, usageSummaryForRateLimits } = require('../../utils/openaiImageUsage')
 const config = require('../../../config/config')
-
-function toNumber(value) {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0
-}
-
-function firstNumber(...values) {
-  for (const value of values) {
-    const parsed = toNumber(value)
-    if (parsed > 0) {
-      return parsed
-    }
-  }
-  return 0
-}
 
 class OpenAIImageRelayService {
   constructor() {
@@ -95,91 +81,11 @@ class OpenAIImageRelayService {
   }
 
   _extractImageUsage(usageData = {}) {
-    if (!usageData || typeof usageData !== 'object') {
-      return {
-        kind: 'image',
-        inputTextTokens: 0,
-        inputImageTokens: 0,
-        outputImageTokens: 0,
-        cacheReadTextTokens: 0,
-        cacheReadImageTokens: 0,
-        totalTokens: 0,
-        rawUsage: usageData || null
-      }
-    }
-
-    const inputDetails = usageData.input_tokens_details || usageData.prompt_tokens_details || {}
-    const outputDetails =
-      usageData.output_tokens_details || usageData.completion_tokens_details || {}
-    const cacheDetails = usageData.cache_read_input_tokens_details || {}
-
-    let inputTextTokens = firstNumber(
-      inputDetails.text_tokens,
-      inputDetails.input_text_tokens,
-      usageData.input_text_tokens,
-      usageData.prompt_text_tokens
-    )
-    const inputImageTokens = firstNumber(
-      inputDetails.image_tokens,
-      inputDetails.input_image_tokens,
-      usageData.input_image_tokens,
-      usageData.prompt_image_tokens
-    )
-    const outputImageTokens = firstNumber(
-      outputDetails.image_tokens,
-      outputDetails.output_image_tokens,
-      usageData.output_image_tokens,
-      usageData.output_tokens,
-      usageData.completion_tokens
-    )
-    const cacheReadTextTokens = firstNumber(
-      inputDetails.cached_text_tokens,
-      cacheDetails.text_tokens,
-      usageData.cache_read_text_tokens
-    )
-    const cacheReadImageTokens = firstNumber(
-      inputDetails.cached_image_tokens,
-      cacheDetails.image_tokens,
-      usageData.cache_read_image_tokens
-    )
-
-    if (!inputTextTokens && !inputImageTokens) {
-      inputTextTokens = firstNumber(usageData.input_tokens, usageData.prompt_tokens)
-    }
-
-    const knownTotal =
-      inputTextTokens +
-      inputImageTokens +
-      outputImageTokens +
-      cacheReadTextTokens +
-      cacheReadImageTokens
-    const totalTokens = firstNumber(usageData.total_tokens, knownTotal)
-
-    return {
-      kind: 'image',
-      inputTextTokens: inputTextTokens || (knownTotal ? 0 : toNumber(usageData.input_tokens)),
-      inputImageTokens,
-      outputImageTokens,
-      cacheReadTextTokens,
-      cacheReadImageTokens,
-      totalTokens,
-      rawUsage: usageData
-    }
+    return extractImageUsage(usageData)
   }
 
   _usageSummaryForRateLimits(imageUsage = {}) {
-    const inputTokens = toNumber(imageUsage.inputTextTokens) + toNumber(imageUsage.inputImageTokens)
-    const outputTokens = toNumber(imageUsage.outputImageTokens)
-    const cacheReadTokens =
-      toNumber(imageUsage.cacheReadTextTokens) + toNumber(imageUsage.cacheReadImageTokens)
-    return {
-      totalInputTokens: inputTokens + cacheReadTokens,
-      inputTokens,
-      outputTokens,
-      cacheCreateTokens: 0,
-      cacheReadTokens,
-      totalTokens: inputTokens + outputTokens + cacheReadTokens
-    }
+    return usageSummaryForRateLimits(imageUsage)
   }
 
   async _recordImageUsage({

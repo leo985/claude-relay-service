@@ -70,15 +70,35 @@ describe('openaiCompatible image features', () => {
   })
 
   test('builds explicit features for Images API requests', () => {
-    expect(
-      getRequestFeaturesForImages({ model: 'gpt-image-2' }, { operation: 'edits' })
-    ).toMatchObject({
+    // generations 不再强制 responses-only：允许 token 账号（codex/responses + image_generation）
+    const generations = getRequestFeaturesForImages(
+      { model: 'gpt-image-2' },
+      { operation: 'generations' }
+    )
+    expect(generations).toMatchObject({
+      endpointKind: 'images',
+      hasImageGeneration: true,
+      imageOperation: 'generations',
+      imageModel: 'gpt-image-2'
+    })
+    expect(generations.openaiResponsesOnly).toBeUndefined()
+
+    // edits 仅 responses 账号支持，需显式传 responsesOnly
+    const edits = getRequestFeaturesForImages(
+      { model: 'gpt-image-2' },
+      { operation: 'edits', responsesOnly: true }
+    )
+    expect(edits).toMatchObject({
       endpointKind: 'images',
       hasImageGeneration: true,
       imageOperation: 'edits',
       imageModel: 'gpt-image-2',
       openaiResponsesOnly: true
     })
+
+    // 不传 responsesOnly 时不会强制
+    const editsOpen = getRequestFeaturesForImages({ model: 'gpt-image-2' }, { operation: 'edits' })
+    expect(editsOpen.openaiResponsesOnly).toBeUndefined()
   })
 
   test('ranks image models separately from text boundModel', () => {

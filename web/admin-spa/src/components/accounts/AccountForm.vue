@@ -2141,6 +2141,21 @@
               </p>
             </div>
 
+            <!-- OpenAI token 账号：图片生成能力开关 -->
+            <div
+              v-if="form.platform === 'openai'"
+              class="rounded-lg border border-gray-200 p-3 dark:border-gray-700"
+            >
+              <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                <input v-model="form.supportsImageGeneration" type="checkbox" />
+                支持图片生成
+              </label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                开启后该账号可服务 /images/generations（走 ChatGPT 后端 codex/responses，单图约
+                60s，当前仅支持 n=1）
+              </p>
+            </div>
+
             <!-- 手动输入 Token 字段 -->
             <div
               v-if="
@@ -3161,6 +3176,21 @@
             />
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
               数字越小优先级越高，建议范围：1-100
+            </p>
+          </div>
+
+          <!-- OpenAI token 账号：图片生成能力开关（编辑模式） -->
+          <div
+            v-if="form.platform === 'openai'"
+            class="rounded-lg border border-gray-200 p-3 dark:border-gray-700"
+          >
+            <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+              <input v-model="form.supportsImageGeneration" type="checkbox" />
+              支持图片生成
+            </label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              开启后该账号可服务 /images/generations（走 ChatGPT 后端 codex/responses，单图约
+              60s，当前仅支持 n=1）
             </p>
           </div>
 
@@ -5582,6 +5612,7 @@ const handleOAuthSuccess = async (tokenInfoOrList) => {
       data.openaiOauth = tokenInfo.tokens || tokenInfo
       data.accountInfo = tokenInfo.accountInfo
       data.priority = form.value.priority || 50
+      data.supportsImageGeneration = !!form.value.supportsImageGeneration
     } else if (currentPlatform === 'droid') {
       const rawTokens = tokenInfo.tokens || tokenInfo || {}
 
@@ -5954,6 +5985,7 @@ const createAccount = async () => {
       data.needsImmediateRefresh = true
       data.requireRefreshSuccess = true // 必须刷新成功才能创建账户
       data.priority = form.value.priority || 50
+      data.supportsImageGeneration = !!form.value.supportsImageGeneration
     } else if (form.value.platform === 'droid') {
       data.priority = form.value.priority || 50
       data.endpointType = form.value.endpointType || 'anthropic'
@@ -6325,6 +6357,7 @@ const updateAccount = async () => {
     // OpenAI 账号优先级更新
     if (props.account.platform === 'openai') {
       data.priority = form.value.priority || 50
+      data.supportsImageGeneration = !!form.value.supportsImageGeneration
     }
 
     // Gemini 账号优先级更新

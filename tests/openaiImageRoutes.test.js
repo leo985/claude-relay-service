@@ -56,6 +56,10 @@ jest.mock('../src/services/relay/openaiImageRelayService', () => ({
   handleEdits: jest.fn()
 }))
 
+jest.mock('../src/services/relay/openaiTokenImageRelayService', () => ({
+  handleGenerations: jest.fn()
+}))
+
 jest.mock('../src/services/apiKeyService', () => ({
   hasPermission: jest.fn(() => true),
   recordUsage: jest.fn()
@@ -105,7 +109,9 @@ jest.mock('../src/services/requestBodyRuleService', () => ({
 
 const unifiedOpenAIScheduler = require('../src/services/scheduler/unifiedOpenAIScheduler')
 const openaiResponsesAccountService = require('../src/services/account/openaiResponsesAccountService')
+const openaiAccountService = require('../src/services/account/openaiAccountService')
 const openaiImageRelayService = require('../src/services/relay/openaiImageRelayService')
+const openaiTokenImageRelayService = require('../src/services/relay/openaiTokenImageRelayService')
 const openaiRoutes = require('../src/routes/openaiRoutes')
 
 function createReq(overrides = {}) {
@@ -174,8 +180,7 @@ describe('openai image routes', () => {
         endpointKind: 'images',
         hasImageGeneration: true,
         imageOperation: 'generations',
-        imageModel: 'gpt-image-2',
-        openaiResponsesOnly: true
+        imageModel: 'gpt-image-2'
       })
     )
     expect(openaiImageRelayService.handleGenerations).toHaveBeenCalledWith(
@@ -184,6 +189,39 @@ describe('openai image routes', () => {
       expect.objectContaining({ id: 'resp-1' }),
       req.apiKey
     )
+  })
+
+  test('routes image generations through token-mode accounts to the token image relay', async () => {
+    unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValueOnce({
+      accountId: 'tok-1',
+      accountType: 'openai'
+    })
+    openaiAccountService.getAccount.mockResolvedValueOnce({
+      id: 'tok-1',
+      name: 'GPT Token',
+      accountId: 'chatgpt-acct-1',
+      accessToken: 'enc-token',
+      refreshToken: 'enc-refresh',
+      isActive: 'true',
+      status: 'active'
+    })
+    openaiAccountService.isTokenExpired.mockReturnValueOnce(false)
+    openaiAccountService.decrypt.mockReturnValueOnce('decrypted-token')
+    openaiTokenImageRelayService.handleGenerations.mockResolvedValueOnce({ ok: true })
+
+    const req = createReq({ body: { prompt: 'draw a corgi' } })
+    const res = createRes()
+
+    await openaiRoutes.handleImageGenerations(req, res)
+
+    expect(openaiTokenImageRelayService.handleGenerations).toHaveBeenCalledWith(
+      req,
+      res,
+      expect.objectContaining({ id: 'tok-1' }),
+      req.apiKey,
+      'decrypted-token'
+    )
+    expect(openaiImageRelayService.handleGenerations).not.toHaveBeenCalled()
   })
 
   test('routes multipart image edits without parsing the request body', async () => {

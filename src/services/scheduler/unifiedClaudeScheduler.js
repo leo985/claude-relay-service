@@ -454,7 +454,15 @@ class UnifiedClaudeScheduler {
         accountType: selectedAccount.accountType
       }
     } catch (error) {
-      logger.error('❌ Failed to select account for API key:', error)
+      // "No available Claude accounts" is expected when the pool is empty — the
+      // route handler (api.js) falls back to OpenAI-Responses passthrough, so
+      // log at warn to avoid burying real errors in noise. Other errors
+      // (session binding unavailable, dedicated rate limited) stay at error.
+      if (error?.message?.includes('No available Claude accounts')) {
+        logger.warn('⚠️ No available Claude accounts for API key (will fall back):', error.message)
+      } else {
+        logger.error('❌ Failed to select account for API key:', error)
+      }
       throw error
     }
   }

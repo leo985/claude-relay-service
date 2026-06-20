@@ -145,16 +145,21 @@ function getRequestFeaturesFromBody(body = {}, endpointKind = null) {
 }
 
 function getRequestFeaturesForImages(body = {}, options = {}) {
-  return {
+  const features = {
     endpointKind: 'images',
     hasTools: false,
     hasImages: false,
     hasReasoning: false,
     hasImageGeneration: true,
     imageOperation: options.operation || 'generations',
-    imageModel: body?.model || options.defaultModel || 'gpt-image-2',
-    openaiResponsesOnly: true
+    imageModel: body?.model || options.defaultModel || 'gpt-image-2'
   }
+  // generations 允许 token 账号（codex/responses + image_generation 工具）；
+  // edits 仅 responses 账号支持（codex image_generation 工具不支持图生图）
+  if (options.responsesOnly === true) {
+    features.openaiResponsesOnly = true
+  }
+  return features
 }
 
 function normalizeStringArray(value) {

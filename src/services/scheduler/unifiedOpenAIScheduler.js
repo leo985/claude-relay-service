@@ -10,6 +10,7 @@ const {
   getOpenAIImageModelRank,
   getOpenAIResponsesModelRank
 } = require('../../utils/openaiCompatible')
+const { resolveOpenAIAccountBinding } = require('../../utils/openaiBindingHelper')
 
 class UnifiedOpenAIScheduler {
   constructor() {
@@ -214,13 +215,18 @@ class UnifiedOpenAIScheduler {
   ) {
     try {
       requestFeatures = this._normalizeRequestFeatures(requestFeatures)
+      const { binding: openaiBinding, field: openaiBindingField } = resolveOpenAIAccountBinding(
+        apiKeyData,
+        requestFeatures
+      )
+
       // 如果API Key绑定了专属账户或分组，优先使用
-      if (apiKeyData.openaiAccountId) {
+      if (openaiBinding) {
         // 检查是否是分组
-        if (apiKeyData.openaiAccountId.startsWith('group:')) {
-          const groupId = apiKeyData.openaiAccountId.replace('group:', '')
+        if (openaiBinding.startsWith('group:')) {
+          const groupId = openaiBinding.replace('group:', '')
           logger.info(
-            `🎯 API key ${apiKeyData.name} is bound to group ${groupId}, selecting from group`
+            `🎯 API key ${apiKeyData.name} is bound to group ${groupId} via ${openaiBindingField}, selecting from group`
           )
           return await this.selectAccountFromGroup(
             groupId,
@@ -236,13 +242,13 @@ class UnifiedOpenAIScheduler {
         let accountType = 'openai'
 
         // 检查是否有 responses: 前缀（用于区分 OpenAI-Responses 账户）
-        if (apiKeyData.openaiAccountId.startsWith('responses:')) {
-          const accountId = apiKeyData.openaiAccountId.replace('responses:', '')
+        if (openaiBinding.startsWith('responses:')) {
+          const accountId = openaiBinding.replace('responses:', '')
           boundAccount = await openaiResponsesAccountService.getAccount(accountId)
           accountType = 'openai-responses'
         } else {
           // 普通 OpenAI 账户
-          boundAccount = await openaiAccountService.getAccount(apiKeyData.openaiAccountId)
+          boundAccount = await openaiAccountService.getAccount(openaiBinding)
           accountType = 'openai'
         }
 
@@ -281,6 +287,18 @@ class UnifiedOpenAIScheduler {
                 error.statusCode = isRateLimited ? 429 : 403
                 throw error
               }
+
+              // 图片生成请求：专属 token 账号也需显式开启 supportsImageGeneration
+              if (
+                requestFeatures.hasImageGeneration &&
+                boundAccount.supportsImageGeneration !== true
+              ) {
+                const errorMsg = `Dedicated account ${boundAccount.name} does not support image generation`
+                logger.warn(`⚠️ ${errorMsg}`)
+                const error = new Error(errorMsg)
+                error.statusCode = 400
+                throw error
+              }
             } else {
               const hasRateLimitFlag = this._isRateLimited(boundAccount.rateLimitStatus)
               if (hasRateLimitFlag) {
@@ -296,7 +314,7 @@ class UnifiedOpenAIScheduler {
                 // 限流已解除，刷新账户最新状态，确保后续调度信息准确
                 boundAccount = await openaiResponsesAccountService.getAccount(boundAccount.id)
                 if (!boundAccount) {
-                  const errorMsg = `Dedicated account ${apiKeyData.openaiAccountId} not found after rate limit reset`
+                  const errorMsg = `Dedicated account ${openaiBinding} not found after rate limit reset`
                   logger.warn(`⚠️ ${errorMsg}`)
                   const error = new Error(errorMsg)
                   error.statusCode = 404
@@ -368,7 +386,7 @@ class UnifiedOpenAIScheduler {
           // 专属账户不可用时直接报错，不降级到共享池
           let errorMsg
           if (!boundAccount) {
-            errorMsg = `Dedicated account ${apiKeyData.openaiAccountId} not found`
+            errorMsg = `Dedicated account ${openaiBinding} not found`
           } else if (!(boundAccount.isActive === true || boundAccount.isActive === 'true')) {
             errorMsg = `Dedicated account ${boundAccount.name} is not active`
           } else if (boundAccount.status === 'unauthorized') {
@@ -554,6 +572,15 @@ class UnifiedOpenAIScheduler {
             )
             continue
           }
+        }
+
+        // 图片生成请求：仅放行显式开启 supportsImageGeneration 的 token 账号
+        // （走 codex/responses + image_generation 工具）
+        if (requestFeatures.hasImageGeneration && account.supportsImageGeneration !== true) {
+          logger.debug(
+            `⏭️ Skipping OpenAI account ${account.name} - image generation not supported`
+          )
+          continue
         }
 
         availableAccounts.push({
@@ -1262,6 +1289,22 @@ class UnifiedOpenAIScheduler {
               accountType,
               account,
               `model_not_supported:${requestedModel}`
+            )
+            continue
+          }
+        }
+
+        if (accountType === 'openai' && requestFeatures.hasImageGeneration) {
+          if (account.supportsImageGeneration !== true) {
+            logger.debug(
+              `⏭️ Skipping group member OpenAI account ${account.name} - image generation not supported`
+            )
+            this._recordGroupSkip(
+              skipReasons,
+              memberId,
+              accountType,
+              account,
+              'image_generation_not_supported'
             )
             continue
           }

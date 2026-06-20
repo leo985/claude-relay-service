@@ -502,6 +502,11 @@ async function createAccount(accountData) {
       accountData.disableAutoProtection === true || accountData.disableAutoProtection === 'true'
         ? 'true'
         : 'false',
+    // 图片生成能力开关（走 codex/responses + image_generation 工具）
+    supportsImageGeneration:
+      accountData.supportsImageGeneration === true || accountData.supportsImageGeneration === 'true'
+        ? 'true'
+        : 'false',
     lastRefresh: now,
     createdAt: now,
     updatedAt: now
@@ -549,6 +554,8 @@ async function getAccount(accountId) {
   if (accountData.email) {
     accountData.email = decrypt(accountData.email)
   }
+  // 归一化图片生成能力标记为布尔值
+  accountData.supportsImageGeneration = accountData.supportsImageGeneration === 'true'
   if (accountData.openaiOauth) {
     try {
       accountData.openaiOauth = JSON.parse(decrypt(accountData.openaiOauth))
@@ -615,6 +622,14 @@ async function updateAccount(accountId, updates) {
   if (updates.disableAutoProtection !== undefined) {
     updates.disableAutoProtection =
       updates.disableAutoProtection === true || updates.disableAutoProtection === 'true'
+        ? 'true'
+        : 'false'
+  }
+
+  // 处理 supportsImageGeneration 布尔值转字符串
+  if (updates.supportsImageGeneration !== undefined) {
+    updates.supportsImageGeneration =
+      updates.supportsImageGeneration === true || updates.supportsImageGeneration === 'true'
         ? 'true'
         : 'false'
   }
@@ -745,6 +760,7 @@ async function getAllAccounts() {
         ...accountData,
         isActive: accountData.isActive === 'true',
         schedulable: accountData.schedulable !== 'false',
+        supportsImageGeneration: accountData.supportsImageGeneration === 'true',
         openaiOauth: maskedOauth,
         accessToken: maskedAccessToken,
         refreshToken: maskedRefreshToken,

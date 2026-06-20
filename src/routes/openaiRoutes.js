@@ -9,6 +9,7 @@ const openaiAccountService = require('../services/account/openaiAccountService')
 const openaiResponsesAccountService = require('../services/account/openaiResponsesAccountService')
 const openaiResponsesRelayService = require('../services/relay/openaiResponsesRelayService')
 const openaiImageRelayService = require('../services/relay/openaiImageRelayService')
+const openaiTokenImageRelayService = require('../services/relay/openaiTokenImageRelayService')
 const apiKeyService = require('../services/apiKeyService')
 const redis = require('../models/redis')
 const crypto = require('crypto')
@@ -1092,18 +1093,29 @@ const handleImageGenerations = async (req, res) => {
     }
 
     const requestFeatures = getRequestFeaturesForImages(req.body, { operation: 'generations' })
-    const { accountType, account } = await getOpenAIAuthToken(
+    const { accountType, account, accessToken } = await getOpenAIAuthToken(
       apiKeyData,
       null,
       req.body.model,
       requestFeatures
     )
 
-    if (accountType !== 'openai-responses') {
-      return createUnsupportedOpenAIAccountTypeResponse(res)
+    if (accountType === 'openai-responses') {
+      return openaiImageRelayService.handleGenerations(req, res, account, apiKeyData)
     }
 
-    return openaiImageRelayService.handleGenerations(req, res, account, apiKeyData)
+    if (accountType === 'openai') {
+      // token 账号：走 codex/responses + image_generation 工具的适配中继
+      return openaiTokenImageRelayService.handleGenerations(
+        req,
+        res,
+        account,
+        apiKeyData,
+        accessToken
+      )
+    }
+
+    return createUnsupportedOpenAIAccountTypeResponse(res)
   } catch (error) {
     logger.error('Image generations request failed:', error)
     if (res.headersSent) {
@@ -1145,7 +1157,8 @@ const handleImageEdits = async (req, res) => {
 
     const requestFeatures = getRequestFeaturesForImages(null, {
       operation: 'edits',
-      defaultModel: 'gpt-image-2'
+      defaultModel: 'gpt-image-2',
+      responsesOnly: true
     })
     const { accountType, account } = await getOpenAIAuthToken(
       apiKeyData,
