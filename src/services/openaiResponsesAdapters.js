@@ -184,7 +184,7 @@ class OpenAIResponsesAdapters {
       object: 'response',
       created_at: chatResponse.created || Math.floor(Date.now() / 1000),
       status: finishReason === 'length' ? 'incomplete' : 'completed',
-      model: chatResponse.model || requestedModel || '',
+      model: requestedModel || chatResponse.model || '',
       output,
       parallel_tool_calls: true,
       tool_choice: 'auto'
@@ -243,7 +243,7 @@ class OpenAIResponsesAdapters {
       object: 'response',
       created_at: Math.floor(Date.now() / 1000),
       status,
-      model: claudeResponse.model || requestedModel || '',
+      model: requestedModel || claudeResponse.model || '',
       output,
       parallel_tool_calls: true,
       tool_choice: 'auto'
@@ -292,7 +292,7 @@ class OpenAIResponsesAdapters {
       state.createdAt = eventData.created
     }
     if (eventData.model) {
-      state.model = eventData.model
+      state.model = requestedModel || eventData.model
     }
     if (eventData.usage) {
       state.usage = this._chatUsageToResponsesUsage(eventData.usage)

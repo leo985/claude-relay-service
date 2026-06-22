@@ -212,6 +212,49 @@ describe('openaiResponsesRelayService usage accounting', () => {
     expect(openaiResponsesAccountService.updateUsageQuota).toHaveBeenCalledWith('acct-1', 0.001)
   })
 
+  test('rewrites structured response model fields to requested alias without changing usage model', async () => {
+    const req = createReq({
+      body: { model: 'gpt-5.5' },
+      _openaiCompatible: { requestedModel: 'gpt-5.5' }
+    })
+    const res = createRes()
+    const usage = { input_tokens: 3, output_tokens: 4, total_tokens: 7 }
+
+    await openaiResponsesRelayService._handleNormalResponse(
+      {
+        status: 200,
+        data: {
+          id: 'resp-1',
+          model: 'GLM-5.1',
+          response: { id: 'resp-1', model: 'GLM-5.1' },
+          output: [{ type: 'message', content: [{ type: 'output_text', text: 'I am GLM-5.1' }] }],
+          usage
+        }
+      },
+      res,
+      { id: 'acct-1', dailyQuota: '0' },
+      { id: 'key-1' },
+      'GLM-5.1',
+      req
+    )
+
+    expect(res.payload.model).toBe('gpt-5.5')
+    expect(res.payload.response.model).toBe('gpt-5.5')
+    expect(res.payload.output[0].content[0].text).toBe('I am GLM-5.1')
+    expect(apiKeyService.recordUsage).toHaveBeenCalledWith(
+      'key-1',
+      3,
+      4,
+      0,
+      0,
+      'GLM-5.1',
+      'acct-1',
+      'openai-responses',
+      'priority',
+      expect.objectContaining({ stream: false, statusCode: 200 })
+    )
+  })
+
   test('captures top-level Chat Completions stream usage once', async () => {
     extractOpenAICacheReadTokens.mockReturnValue(2)
 
@@ -254,6 +297,55 @@ describe('openaiResponsesRelayService usage accounting', () => {
       expect.objectContaining({ stream: true, statusCode: 200 })
     )
     expect(updateRateLimitCounters).toHaveBeenCalledTimes(1)
+  })
+
+  test('rewrites streaming SSE model fields to requested alias while preserving actual usage model', async () => {
+    const upstream = new EventEmitter()
+    const req = createReq({
+      body: { model: 'gpt-5.5' },
+      _openaiCompatible: { requestedModel: 'gpt-5.5' },
+      rateLimitInfo: { tokenCountKey: 'tokens', costCountKey: 'cost' }
+    })
+    let res
+    const endPromise = new Promise((resolve) => {
+      res = createRes({ onEnd: resolve })
+
+      openaiResponsesRelayService._handleStreamResponse(
+        { status: 200, data: upstream },
+        res,
+        { id: 'acct-1', dailyQuota: '0' },
+        { id: 'key-1' },
+        'GLM-5.1',
+        jest.fn(),
+        req
+      )
+    })
+
+    upstream.emit(
+      'data',
+      Buffer.from(
+        'event: response.completed\n' +
+          'data: {"type":"response.completed","response":{"id":"resp-1","model":"GLM-5.1","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"output":[]}}\n\n'
+      )
+    )
+    upstream.emit('end')
+    await endPromise
+
+    const forwarded = res.write.mock.calls.map(([chunk]) => chunk).join('')
+    expect(forwarded).toContain('"model":"gpt-5.5"')
+    expect(forwarded).not.toContain('"model":"GLM-5.1"')
+    expect(apiKeyService.recordUsage).toHaveBeenCalledWith(
+      'key-1',
+      3,
+      4,
+      0,
+      0,
+      'GLM-5.1',
+      'acct-1',
+      'openai-responses',
+      'priority',
+      expect.objectContaining({ stream: true, statusCode: 200 })
+    )
   })
 
   test('adds include_usage for Chat Completions streaming upstream requests', () => {

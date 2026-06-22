@@ -210,6 +210,77 @@ class OpenAIResponsesRelayService {
     return `${normalizedBaseApi}${normalizedTargetPath}`
   }
 
+  _getClientModelAlias(req, fallbackModel = null) {
+    return req?._openaiCompatible?.requestedModel || req?.body?.model || fallbackModel
+  }
+
+  _rewriteObjectModelFieldsForClient(value, clientModel) {
+    if (
+      !clientModel ||
+      !value ||
+      typeof value !== 'object' ||
+      Buffer.isBuffer(value) ||
+      typeof value.pipe === 'function'
+    ) {
+      return value
+    }
+
+    if (Array.isArray(value)) {
+      return value.map((item) => this._rewriteObjectModelFieldsForClient(item, clientModel))
+    }
+
+    let rewritten = value
+    const ensureClone = () => {
+      if (rewritten === value) {
+        rewritten = { ...value }
+      }
+      return rewritten
+    }
+
+    if (Object.prototype.hasOwnProperty.call(value, 'model')) {
+      ensureClone().model = clientModel
+    }
+
+    for (const field of ['response', 'message']) {
+      if (value[field] && typeof value[field] === 'object' && !Array.isArray(value[field])) {
+        const nested = this._rewriteObjectModelFieldsForClient(value[field], clientModel)
+        if (nested !== value[field]) {
+          ensureClone()[field] = nested
+        }
+      }
+    }
+
+    return rewritten
+  }
+
+  _rewriteSSEEventModelForClient(event, clientModel) {
+    if (!clientModel || !event || !event.includes('data:')) {
+      return `${event}\n\n`
+    }
+
+    const lines = event.split('\n')
+    const rewrittenLines = lines.map((line) => {
+      if (!line.startsWith('data:')) {
+        return line
+      }
+
+      const jsonStr = line.slice(5).trim()
+      if (!jsonStr || jsonStr === '[DONE]') {
+        return line
+      }
+
+      try {
+        const payload = JSON.parse(jsonStr)
+        const rewritten = this._rewriteObjectModelFieldsForClient(payload, clientModel)
+        return `data: ${JSON.stringify(rewritten)}`
+      } catch {
+        return line
+      }
+    })
+
+    return `${rewrittenLines.join('\n')}\n\n`
+  }
+
   _stripDuplicatedVersionPath(baseApi, targetPath) {
     const safePath = targetPath || ''
     const normalizedTargetPath = safePath.startsWith('/') ? safePath : `/${safePath}`
@@ -835,6 +906,7 @@ class OpenAIResponsesRelayService {
     let rateLimitDetected = false
     let rateLimitResetsInSeconds = null
     let streamEnded = false
+    const clientModelAlias = this._getClientModelAlias(req, requestedModel)
     const shouldAdaptResponsesToChat = req._openaiCompatibleResponseAdapter === 'responses_to_chat'
     const shouldAdaptChatToResponses = req._openaiCompatibleResponseAdapter === 'chat_to_responses'
     const shouldAdaptClaudeToResponses =
@@ -953,7 +1025,7 @@ class OpenAIResponsesRelayService {
           const eventData = JSON.parse(jsonStr)
           const converted = this.responsesAdapters.convertChatStreamChunkToResponses(
             eventData,
-            requestedModel,
+            clientModelAlias,
             responsesStreamState
           )
           for (const chunk of converted) {
@@ -981,10 +1053,13 @@ class OpenAIResponsesRelayService {
           continue
         }
         try {
-          const eventData = JSON.parse(jsonStr)
+          const eventData = this._rewriteObjectModelFieldsForClient(
+            JSON.parse(jsonStr),
+            clientModelAlias
+          )
           const converted = chatConverter.convertStreamChunk(
             eventData,
-            requestedModel,
+            clientModelAlias,
             chatStreamState
           )
           for (const chunk of converted) {
@@ -1004,8 +1079,8 @@ class OpenAIResponsesRelayService {
       }
       const chatSSE = claudeToOpenAIConverter.convertStreamChunk(
         data,
-        requestedModel,
-        responsesStreamState?.responseId || requestedModel || 'chatcmpl'
+        clientModelAlias,
+        responsesStreamState?.responseId || clientModelAlias || 'chatcmpl'
       )
       if (chatSSE) {
         adaptChatSSEToResponses(chatSSE)
@@ -1016,17 +1091,6 @@ class OpenAIResponsesRelayService {
     response.data.on('data', (chunk) => {
       try {
         const chunkStr = chunk.toString()
-
-        // 转发数据给客户端。Responses -> Chat 场景在完整 SSE 事件处转换后再输出。
-        if (
-          !shouldAdaptResponsesToChat &&
-          !shouldAdaptChatToResponses &&
-          !shouldAdaptClaudeToResponses &&
-          !res.destroyed &&
-          !streamEnded
-        ) {
-          res.write(chunk)
-        }
 
         // 同时解析数据以捕获 usage 信息
         buffer += chunkStr
@@ -1045,6 +1109,8 @@ class OpenAIResponsesRelayService {
                 adaptChatSSEToResponses(event)
               } else if (shouldAdaptClaudeToResponses) {
                 adaptAnthropicSSEToResponses(event)
+              } else if (!res.destroyed && !streamEnded) {
+                res.write(this._rewriteSSEEventModelForClient(event, clientModelAlias))
               }
             }
           }
@@ -1064,6 +1130,8 @@ class OpenAIResponsesRelayService {
           adaptChatSSEToResponses(buffer)
         } else if (shouldAdaptClaudeToResponses) {
           adaptAnthropicSSEToResponses(buffer)
+        } else if (!res.destroyed && !streamEnded) {
+          res.write(this._rewriteSSEEventModelForClient(buffer, clientModelAlias))
         }
       }
 
@@ -1123,7 +1191,7 @@ class OpenAIResponsesRelayService {
           res.write('data: [DONE]\n\n')
         } else if (shouldAdaptChatToResponses || shouldAdaptClaudeToResponses) {
           const finalChunks = this.responsesAdapters.finalizeChatToResponsesStream(
-            requestedModel,
+            clientModelAlias,
             responsesStreamState
           )
           for (const chunk of finalChunks) {
@@ -1175,6 +1243,7 @@ class OpenAIResponsesRelayService {
   async _handleNormalResponse(response, res, account, apiKeyData, requestedModel, req) {
     const responseData = response.data
     let clientResponseData = responseData
+    const clientModelAlias = this._getClientModelAlias(req, requestedModel)
 
     // 提取 usage 数据和实际 model
     // 支持两种格式：直接的 usage 或嵌套在 response 中的 usage
@@ -1209,7 +1278,11 @@ class OpenAIResponsesRelayService {
     if (req._openaiCompatibleResponseAdapter === 'responses_to_chat') {
       try {
         const converter = new CodexToOpenAIConverter()
-        clientResponseData = converter.convertResponse(responseData, requestedModel)
+        const rewrittenResponse = this._rewriteObjectModelFieldsForClient(
+          responseData,
+          clientModelAlias
+        )
+        clientResponseData = converter.convertResponse(rewrittenResponse, clientModelAlias)
       } catch (error) {
         logger.warn('Failed to convert Responses payload to Chat Completions format:', error)
       }
@@ -1217,7 +1290,7 @@ class OpenAIResponsesRelayService {
       try {
         clientResponseData = this.responsesAdapters.convertChatCompletionToResponse(
           responseData,
-          requestedModel,
+          clientModelAlias,
           req._openaiCompatibleResponseAdapterContext
         )
       } catch (error) {
@@ -1227,13 +1300,20 @@ class OpenAIResponsesRelayService {
       try {
         clientResponseData = this.responsesAdapters.convertClaudeMessageToResponse(
           responseData,
-          requestedModel,
+          clientModelAlias,
           req._openaiCompatibleResponseAdapterContext
         )
       } catch (error) {
         logger.warn('Failed to convert Anthropic Messages payload to Responses format:', error)
       }
+    } else {
+      clientResponseData = this._rewriteObjectModelFieldsForClient(responseData, clientModelAlias)
     }
+
+    clientResponseData = this._rewriteObjectModelFieldsForClient(
+      clientResponseData,
+      clientModelAlias
+    )
 
     // 返回响应
     res.status(response.status).json(clientResponseData)

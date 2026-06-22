@@ -239,7 +239,7 @@ describe('OpenAIResponsesAdapters', () => {
     expect(result).toMatchObject({
       object: 'response',
       status: 'completed',
-      model: 'glm-5.2',
+      model: 'gpt-5.5',
       output: [
         {
           type: 'message',
@@ -266,7 +266,7 @@ describe('OpenAIResponsesAdapters', () => {
     expect(result).toMatchObject({
       object: 'response',
       status: 'completed',
-      model: 'glm-5.2',
+      model: 'gpt-5.5',
       output: [
         {
           type: 'message',
