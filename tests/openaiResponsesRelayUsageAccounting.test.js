@@ -266,4 +266,64 @@ describe('openaiResponsesRelayService usage accounting', () => {
       include_usage: true
     })
   })
+
+  test('adapts Responses requests to Chat Completions upstream accounts', () => {
+    const req = createReq({
+      path: '/v1/responses',
+      body: {
+        model: 'gpt-5.5',
+        instructions: 'system',
+        input: 'hello',
+        stream: true,
+        max_output_tokens: 100
+      }
+    })
+
+    const result = openaiResponsesRelayService.resolveUpstreamRequest(req, {
+      id: 'acct-chat',
+      providerEndpoint: 'chat_completions',
+      boundModel: 'GLM-5.1'
+    })
+
+    expect(result.targetPath).toBe('/v1/chat/completions')
+    expect(result.responseAdapter).toBe('chat_to_responses')
+    expect(result.body).toMatchObject({
+      model: 'GLM-5.1',
+      stream: true,
+      max_tokens: 100,
+      messages: [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'hello' }
+      ]
+    })
+  })
+
+  test('adapts Responses requests to Anthropic passthrough upstream accounts', () => {
+    const req = createReq({
+      path: '/v1/responses',
+      body: {
+        model: 'gpt-5.5',
+        instructions: 'system',
+        input: 'hello',
+        stream: true,
+        max_output_tokens: 100
+      }
+    })
+
+    const result = openaiResponsesRelayService.resolveUpstreamRequest(req, {
+      id: 'acct-pass',
+      providerEndpoint: 'passthrough',
+      boundModel: 'GLM-5.1'
+    })
+
+    expect(result.targetPath).toBe('/v1/messages')
+    expect(result.responseAdapter).toBe('claude_to_responses')
+    expect(result.body).toMatchObject({
+      model: 'GLM-5.1',
+      system: 'system',
+      stream: true,
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'hello' }]
+    })
+  })
 })

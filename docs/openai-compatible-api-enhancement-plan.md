@@ -94,8 +94,8 @@
 | `/openai/v1/chat/completions` | `responses` | `/v1/responses` | Chat Completions 转 Responses body |
 | `/openai/v1/chat/completions` | `passthrough` / `auto` | 原始 path | 原始 body |
 | `/openai/v1/responses` | `responses` | `/v1/responses` | 原始 Responses body |
-| `/openai/v1/responses` | `chat_completions` | Phase 1 返回 400 | 暂不做 Responses -> Chat 反向转换 |
-| `/openai/v1/responses` | `passthrough` / `auto` | 原始 path | 原始 body |
+| `/openai/v1/responses` | `chat_completions` | `/v1/chat/completions` | Responses 转 Chat Completions body |
+| `/openai/v1/responses` | `passthrough` / `auto` | `/v1/messages` | Responses 转 Anthropic Messages body |
 
 ### 3.3 路由时机要求
 
@@ -578,7 +578,7 @@ Phase 4（前端）
 | R-02 | `/openai/v1/chat/completions`，账号 `responses` | 上游收到 `/v1/responses` 和转换后的 `input` body |
 | R-03 | `/openai/v1/chat/completions`，未知 model 但匹配 `boundModel` | 进入 OpenAI 兼容流，不进入 Claude |
 | R-04 | `/api/v1/chat/completions`，未知 model 且无 OpenAI 兼容匹配 | 保持现有默认路由行为 |
-| R-05 | `/openai/v1/responses`，账号 `chat_completions` | Phase 1 返回 400，提示不支持 Responses -> Chat 转换 |
+| R-05 | `/openai/v1/responses`，账号 `chat_completions` | 上游收到 `/v1/chat/completions` 和转换后的 Chat Completions body |
 
 ### 8.2 Account Service 验证
 

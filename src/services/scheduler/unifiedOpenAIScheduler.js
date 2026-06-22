@@ -10,7 +10,6 @@ const {
   getOpenAIImageModelRank,
   getOpenAIResponsesModelRank
 } = require('../../utils/openaiCompatible')
-const { resolveOpenAIAccountBinding } = require('../../utils/openaiBindingHelper')
 
 class UnifiedOpenAIScheduler {
   constructor() {
@@ -215,10 +214,7 @@ class UnifiedOpenAIScheduler {
   ) {
     try {
       requestFeatures = this._normalizeRequestFeatures(requestFeatures)
-      const { binding: openaiBinding, field: openaiBindingField } = resolveOpenAIAccountBinding(
-        apiKeyData,
-        requestFeatures
-      )
+      const openaiBinding = apiKeyData.openaiAccountId
 
       // 如果API Key绑定了专属账户或分组，优先使用
       if (openaiBinding) {
@@ -226,7 +222,7 @@ class UnifiedOpenAIScheduler {
         if (openaiBinding.startsWith('group:')) {
           const groupId = openaiBinding.replace('group:', '')
           logger.info(
-            `🎯 API key ${apiKeyData.name} is bound to group ${groupId} via ${openaiBindingField}, selecting from group`
+            `🎯 API key ${apiKeyData.name} is bound to group ${groupId}, selecting from group`
           )
           return await this.selectAccountFromGroup(
             groupId,

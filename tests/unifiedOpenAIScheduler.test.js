@@ -1,4 +1,7 @@
 jest.mock('../src/services/account/openaiAccountService', () => ({
+  getAccount: jest.fn(),
+  isTokenExpired: jest.fn(),
+  recordUsage: jest.fn(),
   setAccountRateLimited: jest.fn()
 }))
 
@@ -8,7 +11,10 @@ jest.mock('../src/services/account/openaiResponsesAccountService', () => ({
   updateAccount: jest.fn()
 }))
 
-jest.mock('../src/services/accountGroupService', () => ({}))
+jest.mock('../src/services/accountGroupService', () => ({
+  getGroup: jest.fn(),
+  getGroupMembers: jest.fn()
+}))
 jest.mock('../src/models/redis', () => ({}))
 jest.mock('../src/utils/logger', () => ({
   debug: jest.fn(),
@@ -20,9 +26,14 @@ jest.mock('../src/utils/commonHelper', () => ({
   isSchedulable: jest.fn((value) => value !== false && value !== 'false'),
   sortAccountsByPriority: jest.fn((accounts) => accounts)
 }))
-jest.mock('../src/utils/upstreamErrorHelper', () => ({}))
+jest.mock('../src/utils/upstreamErrorHelper', () => ({
+  isTempUnavailable: jest.fn()
+}))
 
+const openaiAccountService = require('../src/services/account/openaiAccountService')
 const openaiResponsesAccountService = require('../src/services/account/openaiResponsesAccountService')
+const accountGroupService = require('../src/services/accountGroupService')
+const upstreamErrorHelper = require('../src/utils/upstreamErrorHelper')
 const unifiedOpenAIScheduler = require('../src/services/scheduler/unifiedOpenAIScheduler')
 
 describe('UnifiedOpenAIScheduler', () => {
@@ -74,6 +85,41 @@ describe('UnifiedOpenAIScheduler', () => {
   })
 
   describe('_rankOpenAIResponsesAccount image features', () => {
+    it('allows Responses requests to use Chat Completions adapters', () => {
+      const result = unifiedOpenAIScheduler._rankOpenAIResponsesAccount(
+        {
+          providerEndpoint: 'chat_completions',
+          supportsTools: true,
+          boundModel: 'GLM-5.1',
+          modelAliases: ['gpt-5.5']
+        },
+        'gpt-5.5',
+        {
+          endpointKind: 'responses'
+        }
+      )
+
+      expect(result.ok).toBe(true)
+      expect(result.rank).toBe(2)
+    })
+
+    it('allows Responses requests to use passthrough adapters', () => {
+      const result = unifiedOpenAIScheduler._rankOpenAIResponsesAccount(
+        {
+          providerEndpoint: 'passthrough',
+          boundModel: 'GLM-5.1',
+          modelAliases: ['gpt-5.5']
+        },
+        'gpt-5.5',
+        {
+          endpointKind: 'responses'
+        }
+      )
+
+      expect(result.ok).toBe(true)
+      expect(result.rank).toBe(2)
+    })
+
     it('requires image generation support for Images API requests', () => {
       const result = unifiedOpenAIScheduler._rankOpenAIResponsesAccount(
         {
@@ -160,6 +206,57 @@ describe('UnifiedOpenAIScheduler', () => {
           }
         )
       ).toBe(false)
+    })
+  })
+
+  describe('selectAccountFromGroup image features', () => {
+    it('skips token accounts without explicit image generation support', async () => {
+      accountGroupService.getGroup.mockResolvedValue({
+        id: 'group-1',
+        name: 'Image Group',
+        platform: 'openai'
+      })
+      accountGroupService.getGroupMembers.mockResolvedValue(['tok-no-image', 'tok-image'])
+      upstreamErrorHelper.isTempUnavailable.mockResolvedValue(false)
+      openaiAccountService.isTokenExpired.mockReturnValue(false)
+      openaiAccountService.recordUsage.mockResolvedValue(undefined)
+      openaiAccountService.getAccount.mockImplementation(async (accountId) => {
+        const accounts = {
+          'tok-no-image': {
+            id: 'tok-no-image',
+            name: 'Token Without Images',
+            isActive: 'true',
+            status: 'active',
+            schedulable: 'true',
+            supportsImageGeneration: false
+          },
+          'tok-image': {
+            id: 'tok-image',
+            name: 'Token With Images',
+            isActive: 'true',
+            status: 'active',
+            schedulable: 'true',
+            supportsImageGeneration: true
+          }
+        }
+        return accounts[accountId] || null
+      })
+
+      const result = await unifiedOpenAIScheduler.selectAccountFromGroup(
+        'group-1',
+        null,
+        'gpt-image-2',
+        null,
+        {
+          endpointKind: 'images',
+          hasImageGeneration: true,
+          imageOperation: 'generations',
+          imageModel: 'gpt-image-2'
+        }
+      )
+
+      expect(result).toEqual({ accountId: 'tok-image', accountType: 'openai' })
+      expect(openaiAccountService.recordUsage).toHaveBeenCalledWith('tok-image', 0)
     })
   })
 })

@@ -188,14 +188,17 @@ function getOpenAIResponsesModelRank(account = {}, requestedModel = null) {
   const model = typeof requestedModel === 'string' ? requestedModel.trim() : ''
   const boundModel = typeof account.boundModel === 'string' ? account.boundModel.trim() : ''
   const aliases = normalizeStringArray(account.modelAliases)
+  const modelKey = model.toLowerCase()
+  const boundModelKey = boundModel.toLowerCase()
+  const aliasKeys = aliases.map((alias) => alias.toLowerCase())
 
   if (!model) {
     return 1
   }
-  if (boundModel && model === boundModel) {
+  if (boundModel && modelKey === boundModelKey) {
     return 3
   }
-  if (aliases.includes(model)) {
+  if (aliasKeys.includes(modelKey)) {
     return 2
   }
   if (!boundModel) {
@@ -209,14 +212,17 @@ function getOpenAIImageModelRank(account = {}, requestedModel = null) {
   const boundModel =
     typeof account.imageBoundModel === 'string' ? account.imageBoundModel.trim() : ''
   const aliases = normalizeStringArray(account.imageModelAliases)
+  const modelKey = model.toLowerCase()
+  const boundModelKey = boundModel.toLowerCase()
+  const aliasKeys = aliases.map((alias) => alias.toLowerCase())
 
   if (!model) {
     return 1
   }
-  if (boundModel && model === boundModel) {
+  if (boundModel && modelKey === boundModelKey) {
     return 3
   }
-  if (aliases.includes(model)) {
+  if (aliasKeys.includes(modelKey)) {
     return 2
   }
   if (!boundModel && aliases.length === 0) {
@@ -226,15 +232,26 @@ function getOpenAIImageModelRank(account = {}, requestedModel = null) {
 }
 
 function endpointSupportsKind(providerEndpoint = 'responses', endpointKind = 'responses') {
+  const normalizedEndpoint = normalizeProviderEndpoint(providerEndpoint)
   const protocol = getProviderProtocol(providerEndpoint)
   if (endpointKind === 'images') {
-    return protocol === 'responses' || protocol === 'passthrough'
+    return protocol === 'responses'
   }
   if (endpointKind === 'responses') {
-    return protocol === 'responses' || protocol === 'passthrough'
+    return (
+      protocol === 'responses' ||
+      protocol === 'chat_completions' ||
+      protocol === 'passthrough' ||
+      normalizedEndpoint === 'auto'
+    )
   }
   if (endpointKind === 'chat_completions') {
-    return protocol === 'responses' || protocol === 'chat_completions' || protocol === 'passthrough'
+    return (
+      protocol === 'responses' ||
+      protocol === 'chat_completions' ||
+      protocol === 'passthrough' ||
+      normalizedEndpoint === 'auto'
+    )
   }
   return protocol === 'passthrough'
 }

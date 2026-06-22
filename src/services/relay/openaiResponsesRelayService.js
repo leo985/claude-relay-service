@@ -6,6 +6,7 @@ const openaiResponsesAccountService = require('../account/openaiResponsesAccount
 const apiKeyService = require('../apiKeyService')
 const unifiedOpenAIScheduler = require('../scheduler/unifiedOpenAIScheduler')
 const CodexToOpenAIConverter = require('../codexToOpenAI')
+const OpenAIResponsesAdapters = require('../openaiResponsesAdapters')
 const config = require('../../../config/config')
 const crypto = require('crypto')
 const LRUCache = require('../../utils/lruCache')
@@ -93,6 +94,7 @@ function emptyUsageSummary() {
 class OpenAIResponsesRelayService {
   constructor() {
     this.defaultTimeout = config.requestTimeout || 600000
+    this.responsesAdapters = new OpenAIResponsesAdapters()
   }
 
   // 节流更新 lastUsedAt
@@ -120,21 +122,35 @@ class OpenAIResponsesRelayService {
 
     let targetPath = req.path
     let body = clonePlainObject(req.body || {})
+    let responseAdapter = null
+    let responseAdapterContext = null
+    let validationKind = protocol === 'passthrough' ? endpointKind : protocol
 
     if (protocol === 'responses') {
       targetPath = this._normalizeResponsesPath(endpointKind, original?.path || req.path)
       body = clonePlainObject(req.body || {})
     } else if (protocol === 'chat_completions') {
       if (endpointKind === 'responses') {
-        throw createOpenAICompatibleError(
-          'providerEndpoint=chat_completions does not support Responses API requests in Phase 1'
-        )
+        targetPath = this._normalizeChatCompletionsPath('/v1/chat/completions')
+        responseAdapterContext = this.responsesAdapters.buildResponsesAdapterContext(req.body || {})
+        body = this.responsesAdapters.buildChatCompletionsRequestFromResponses(req.body || {})
+        responseAdapter = 'chat_to_responses'
+      } else {
+        targetPath = this._normalizeChatCompletionsPath(original?.path || req.path)
+        body = originalBody || clonePlainObject(req.body || {})
       }
-      targetPath = this._normalizeChatCompletionsPath(original?.path || req.path)
-      body = originalBody || clonePlainObject(req.body || {})
+      validationKind = 'chat_completions'
     } else {
-      targetPath = original?.path || req.path
-      body = originalBody || clonePlainObject(req.body || {})
+      if (endpointKind === 'responses') {
+        targetPath = '/v1/messages'
+        responseAdapterContext = this.responsesAdapters.buildResponsesAdapterContext(req.body || {})
+        body = this.responsesAdapters.buildAnthropicMessagesRequestFromResponses(req.body || {})
+        responseAdapter = 'claude_to_responses'
+        validationKind = 'chat_completions'
+      } else {
+        targetPath = original?.path || req.path
+        body = originalBody || clonePlainObject(req.body || {})
+      }
     }
 
     const requestedModel = originalBody?.model || req.body?.model || null
@@ -143,11 +159,7 @@ class OpenAIResponsesRelayService {
       body.model = fullAccount.boundModel.trim()
     }
 
-    this._validateAndAdjustRequestBody(
-      body,
-      fullAccount,
-      protocol === 'passthrough' ? endpointKind : protocol
-    )
+    this._validateAndAdjustRequestBody(body, fullAccount, validationKind)
 
     req._openaiCompatible = {
       requestedModel,
@@ -166,8 +178,12 @@ class OpenAIResponsesRelayService {
       requestedModel,
       upstreamModel: body?.model || upstreamModel,
       providerEndpoint,
+      responseAdapterContext,
       responseAdapter:
-        endpointKind === 'chat_completions' && protocol === 'responses' ? 'responses_to_chat' : null
+        responseAdapter ||
+        (endpointKind === 'chat_completions' && protocol === 'responses'
+          ? 'responses_to_chat'
+          : null)
     }
   }
 
@@ -432,6 +448,7 @@ class OpenAIResponsesRelayService {
       this._ensureChatCompletionsStreamUsage(upstreamRequest.body, upstreamRequest.providerEndpoint)
       req._openaiCompatibleUpstreamBody = upstreamRequest.body
       req._openaiCompatibleResponseAdapter = upstreamRequest.responseAdapter
+      req._openaiCompatibleResponseAdapterContext = upstreamRequest.responseAdapterContext
       const targetUrl = this._buildTargetUrl(fullAccount.baseApi, upstreamRequest.targetPath)
       logger.info(`🎯 Forwarding to: ${targetUrl}`)
 
@@ -819,8 +836,20 @@ class OpenAIResponsesRelayService {
     let rateLimitResetsInSeconds = null
     let streamEnded = false
     const shouldAdaptResponsesToChat = req._openaiCompatibleResponseAdapter === 'responses_to_chat'
+    const shouldAdaptChatToResponses = req._openaiCompatibleResponseAdapter === 'chat_to_responses'
+    const shouldAdaptClaudeToResponses =
+      req._openaiCompatibleResponseAdapter === 'claude_to_responses'
     const chatConverter = shouldAdaptResponsesToChat ? new CodexToOpenAIConverter() : null
     const chatStreamState = chatConverter?.createStreamState()
+    const responsesStreamState =
+      shouldAdaptChatToResponses || shouldAdaptClaudeToResponses
+        ? this.responsesAdapters.createChatToResponsesStreamState(
+            req._openaiCompatibleResponseAdapterContext
+          )
+        : null
+    const claudeToOpenAIConverter = shouldAdaptClaudeToResponses
+      ? require('../openaiToClaude')
+      : null
 
     // 解析 SSE 事件以捕获 usage 数据和 model
     const parseSSEForUsage = (data) => {
@@ -869,6 +898,20 @@ class OpenAIResponsesRelayService {
               }
             }
 
+            // Anthropic Messages stream usage is used by passthrough adapters.
+            if (eventData.type === 'message_start' && eventData.message?.usage) {
+              usageData = eventData.message.usage
+              if (eventData.message.model) {
+                actualModel = eventData.message.model
+              }
+            }
+            if (eventData.type === 'message_delta' && eventData.usage) {
+              usageData = {
+                ...(usageData || {}),
+                ...eventData.usage
+              }
+            }
+
             // 检查是否有限流错误
             if (eventData.error) {
               // 检查多种可能的限流错误类型
@@ -889,6 +932,37 @@ class OpenAIResponsesRelayService {
           } catch (e) {
             // 忽略解析错误
           }
+        }
+      }
+    }
+
+    const adaptChatSSEToResponses = (data) => {
+      if (!responsesStreamState) {
+        return
+      }
+      const lines = data.split('\n')
+      for (const line of lines) {
+        if (!line.startsWith('data:')) {
+          continue
+        }
+        const jsonStr = line.slice(5).trim()
+        if (!jsonStr || jsonStr === '[DONE]') {
+          continue
+        }
+        try {
+          const eventData = JSON.parse(jsonStr)
+          const converted = this.responsesAdapters.convertChatStreamChunkToResponses(
+            eventData,
+            requestedModel,
+            responsesStreamState
+          )
+          for (const chunk of converted) {
+            if (!res.destroyed && !streamEnded) {
+              res.write(chunk)
+            }
+          }
+        } catch {
+          // Ignore malformed upstream SSE events while preserving the stream.
         }
       }
     }
@@ -924,13 +998,33 @@ class OpenAIResponsesRelayService {
       }
     }
 
+    const adaptAnthropicSSEToResponses = (data) => {
+      if (!claudeToOpenAIConverter) {
+        return
+      }
+      const chatSSE = claudeToOpenAIConverter.convertStreamChunk(
+        data,
+        requestedModel,
+        responsesStreamState?.responseId || requestedModel || 'chatcmpl'
+      )
+      if (chatSSE) {
+        adaptChatSSEToResponses(chatSSE)
+      }
+    }
+
     // 监听数据流
     response.data.on('data', (chunk) => {
       try {
         const chunkStr = chunk.toString()
 
         // 转发数据给客户端。Responses -> Chat 场景在完整 SSE 事件处转换后再输出。
-        if (!shouldAdaptResponsesToChat && !res.destroyed && !streamEnded) {
+        if (
+          !shouldAdaptResponsesToChat &&
+          !shouldAdaptChatToResponses &&
+          !shouldAdaptClaudeToResponses &&
+          !res.destroyed &&
+          !streamEnded
+        ) {
           res.write(chunk)
         }
 
@@ -947,6 +1041,10 @@ class OpenAIResponsesRelayService {
               parseSSEForUsage(event)
               if (shouldAdaptResponsesToChat) {
                 adaptSSEToChat(event)
+              } else if (shouldAdaptChatToResponses) {
+                adaptChatSSEToResponses(event)
+              } else if (shouldAdaptClaudeToResponses) {
+                adaptAnthropicSSEToResponses(event)
               }
             }
           }
@@ -962,6 +1060,10 @@ class OpenAIResponsesRelayService {
         parseSSEForUsage(buffer)
         if (shouldAdaptResponsesToChat) {
           adaptSSEToChat(buffer)
+        } else if (shouldAdaptChatToResponses) {
+          adaptChatSSEToResponses(buffer)
+        } else if (shouldAdaptClaudeToResponses) {
+          adaptAnthropicSSEToResponses(buffer)
         }
       }
 
@@ -1018,6 +1120,15 @@ class OpenAIResponsesRelayService {
       streamEnded = true
       if (!res.destroyed) {
         if (shouldAdaptResponsesToChat) {
+          res.write('data: [DONE]\n\n')
+        } else if (shouldAdaptChatToResponses || shouldAdaptClaudeToResponses) {
+          const finalChunks = this.responsesAdapters.finalizeChatToResponsesStream(
+            requestedModel,
+            responsesStreamState
+          )
+          for (const chunk of finalChunks) {
+            res.write(chunk)
+          }
           res.write('data: [DONE]\n\n')
         }
         res.end()
@@ -1101,6 +1212,26 @@ class OpenAIResponsesRelayService {
         clientResponseData = converter.convertResponse(responseData, requestedModel)
       } catch (error) {
         logger.warn('Failed to convert Responses payload to Chat Completions format:', error)
+      }
+    } else if (req._openaiCompatibleResponseAdapter === 'chat_to_responses') {
+      try {
+        clientResponseData = this.responsesAdapters.convertChatCompletionToResponse(
+          responseData,
+          requestedModel,
+          req._openaiCompatibleResponseAdapterContext
+        )
+      } catch (error) {
+        logger.warn('Failed to convert Chat Completions payload to Responses format:', error)
+      }
+    } else if (req._openaiCompatibleResponseAdapter === 'claude_to_responses') {
+      try {
+        clientResponseData = this.responsesAdapters.convertClaudeMessageToResponse(
+          responseData,
+          requestedModel,
+          req._openaiCompatibleResponseAdapterContext
+        )
+      } catch (error) {
+        logger.warn('Failed to convert Anthropic Messages payload to Responses format:', error)
       }
     }
 

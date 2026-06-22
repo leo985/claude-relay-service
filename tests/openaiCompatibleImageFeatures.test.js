@@ -3,6 +3,7 @@ const {
   detectEndpointKindFromPath,
   endpointSupportsKind,
   getOpenAIImageModelRank,
+  getOpenAIResponsesModelRank,
   getRequestFeaturesFromBody,
   getRequestFeaturesForImages
 } = require('../src/utils/openaiCompatible')
@@ -12,8 +13,16 @@ describe('openaiCompatible image features', () => {
     expect(detectEndpointKindFromPath('/v1/images/generations')).toBe('images')
     expect(detectEndpointKindFromPath('/images/edits')).toBe('images')
     expect(endpointSupportsKind('responses', 'images')).toBe(true)
-    expect(endpointSupportsKind('passthrough', 'images')).toBe(true)
+    expect(endpointSupportsKind('passthrough', 'images')).toBe(false)
     expect(endpointSupportsKind('chat_completions', 'images')).toBe(false)
+  })
+
+  test('allows explicit adapters for Responses and Chat requests', () => {
+    expect(endpointSupportsKind('passthrough', 'passthrough')).toBe(true)
+    expect(endpointSupportsKind('passthrough', 'chat_completions')).toBe(true)
+    expect(endpointSupportsKind('passthrough', 'responses')).toBe(true)
+    expect(endpointSupportsKind('chat_completions', 'responses')).toBe(true)
+    expect(endpointSupportsKind('auto', 'responses')).toBe(true)
   })
 
   test('detects Responses image_generation tool as image generation capability', () => {
@@ -114,5 +123,20 @@ describe('openaiCompatible image features', () => {
         'draw'
       )
     ).toBe(2)
+  })
+
+  test('matches text and image model aliases case-insensitively', () => {
+    expect(
+      getOpenAIResponsesModelRank({ boundModel: 'GLM-5.1', modelAliases: ['GLM-5.2'] }, 'glm-5.1')
+    ).toBe(3)
+    expect(
+      getOpenAIResponsesModelRank({ boundModel: 'GLM-5.1', modelAliases: ['GLM-5.2'] }, 'glm-5.2')
+    ).toBe(2)
+    expect(
+      getOpenAIImageModelRank(
+        { imageBoundModel: 'GPT-IMAGE-2', imageModelAliases: ['DRAW'] },
+        'gpt-image-2'
+      )
+    ).toBe(3)
   })
 })
