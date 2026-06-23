@@ -12,6 +12,101 @@ class CcrRelayService {
     this.defaultUserAgent = 'claude-relay-service/1.0.0'
   }
 
+  _parseMaybeJson(data) {
+    if (!data) {
+      return null
+    }
+    if (typeof data === 'object' && !Buffer.isBuffer(data)) {
+      return data
+    }
+    const text = Buffer.isBuffer(data) ? data.toString() : String(data)
+    try {
+      return JSON.parse(text)
+    } catch {
+      return { message: text }
+    }
+  }
+
+  _extractErrorMessage(data) {
+    const parsed = this._parseMaybeJson(data)
+    if (!parsed || typeof parsed !== 'object') {
+      return ''
+    }
+    if (typeof parsed.error?.message === 'string') {
+      return parsed.error.message
+    }
+    if (typeof parsed.message === 'string') {
+      return parsed.message
+    }
+    if (typeof parsed.error === 'string') {
+      return parsed.error
+    }
+    return ''
+  }
+
+  _buildSafeCcrErrorPayload(statusCode, upstreamData) {
+    const rawMessage = this._extractErrorMessage(upstreamData)
+    const lowerMessage = rawMessage.toLowerCase()
+    let message = 'Upstream service returned an error. Please try again later.'
+    let code = 'upstream_error'
+
+    if (
+      lowerMessage.includes('model_context_window_exceeded') ||
+      (lowerMessage.includes('context') && lowerMessage.includes('window')) ||
+      lowerMessage.includes('context_length')
+    ) {
+      message = 'Upstream model context window exceeded. Please reduce the input length and retry.'
+      code = 'context_window_exceeded'
+    } else if (statusCode === 429) {
+      message = 'Upstream rate limit exceeded. Please try again later.'
+      code = 'upstream_rate_limited'
+    } else if (statusCode === 401 || statusCode === 403) {
+      message = 'Upstream authentication or permission failed.'
+      code = 'upstream_auth_error'
+    } else if (statusCode === 400) {
+      message = 'Upstream rejected the request. Please check the request and retry.'
+      code = 'upstream_bad_request'
+    } else if (statusCode >= 500) {
+      message = 'Upstream service is temporarily unavailable. Please try again later.'
+      code = 'upstream_service_error'
+    }
+
+    return {
+      type: 'error',
+      error: {
+        type: 'api_error',
+        code,
+        message
+      }
+    }
+  }
+
+  _writeSafeCcrError(responseStream, statusCode, upstreamData, extraHeaders = {}) {
+    const safeError = this._buildSafeCcrErrorPayload(statusCode, upstreamData)
+    const body = JSON.stringify(safeError)
+
+    if (!responseStream.headersSent) {
+      const existingConnection = responseStream.getHeader
+        ? responseStream.getHeader('Connection')
+        : null
+      responseStream.writeHead(statusCode, {
+        ...extraHeaders,
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+        Connection: existingConnection || 'keep-alive'
+      })
+      if (isStreamWritable(responseStream)) {
+        responseStream.write(body)
+      }
+      return
+    }
+
+    if (isStreamWritable(responseStream)) {
+      responseStream.write('event: error\n')
+      responseStream.write(`data: ${body}\n\n`)
+    }
+  }
+
   // 🚀 转发请求到CCR API
   async relayRequest(
     requestBody,
@@ -319,8 +414,20 @@ class CcrRelayService {
       // 更新最后使用时间
       await this._updateLastUsedTime(accountId)
 
-      const responseBody =
-        typeof response.data === 'string' ? response.data : JSON.stringify(response.data)
+      let responseBody
+      if (response.status >= 400) {
+        const rawBody =
+          typeof response.data === 'string' ? response.data : JSON.stringify(response.data)
+        logger.error(
+          `📝 CCR upstream error response from ${account?.name || accountId}: ${rawBody.substring(0, 1000)}`
+        )
+        responseBody = JSON.stringify(
+          this._buildSafeCcrErrorPayload(response.status, response.data)
+        )
+      } else {
+        responseBody =
+          typeof response.data === 'string' ? response.data : JSON.stringify(response.data)
+      }
       logger.debug(`[DEBUG] Final response body to return: ${responseBody}`)
 
       return {
@@ -680,34 +787,32 @@ class CcrRelayService {
               }
             }
 
-            // 设置错误响应的状态码和响应头
-            if (!responseStream.headersSent) {
-              const existingConnection = responseStream.getHeader
-                ? responseStream.getHeader('Connection')
-                : null
-              const errorHeaders = {
-                'Content-Type': response.headers['content-type'] || 'application/json',
-                'Cache-Control': 'no-cache',
-                Connection: existingConnection || 'keep-alive'
-              }
-              // 避免 Transfer-Encoding 冲突，让 Express 自动处理
-              delete errorHeaders['Transfer-Encoding']
-              delete errorHeaders['Content-Length']
-              responseStream.writeHead(response.status, errorHeaders)
-            }
-
-            // 直接透传错误数据，不进行包装
+            const errorChunks = []
             response.data.on('data', (chunk) => {
-              if (isStreamWritable(responseStream)) {
-                responseStream.write(chunk)
-              }
+              errorChunks.push(chunk)
             })
 
             response.data.on('end', () => {
+              const rawBody = Buffer.concat(errorChunks).toString()
+              logger.error(
+                `📝 [Stream] CCR upstream error response from ${account?.name || accountId}: ${rawBody.substring(0, 1000)}`
+              )
+              this._writeSafeCcrError(responseStream, response.status, rawBody)
               if (isStreamWritable(responseStream)) {
                 responseStream.end()
               }
               resolve() // 不抛出异常，正常完成流处理
+            })
+
+            response.data.on('error', (err) => {
+              logger.error('❌ Failed to read CCR stream error response:', err)
+              this._writeSafeCcrError(responseStream, response.status, {
+                error: { message: err.message }
+              })
+              if (isStreamWritable(responseStream)) {
+                responseStream.end()
+              }
+              resolve()
             })
             return
           }
