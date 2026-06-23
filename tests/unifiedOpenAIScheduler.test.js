@@ -6,8 +6,11 @@ jest.mock('../src/services/account/openaiAccountService', () => ({
 }))
 
 jest.mock('../src/services/account/openaiResponsesAccountService', () => ({
+  checkAndClearRateLimit: jest.fn(),
   getAccount: jest.fn(),
+  isSubscriptionExpired: jest.fn(),
   markAccountRateLimited: jest.fn(),
+  recordUsage: jest.fn(),
   updateAccount: jest.fn()
 }))
 
@@ -39,6 +42,9 @@ const unifiedOpenAIScheduler = require('../src/services/scheduler/unifiedOpenAIS
 describe('UnifiedOpenAIScheduler', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    openaiResponsesAccountService.checkAndClearRateLimit.mockResolvedValue(true)
+    openaiResponsesAccountService.isSubscriptionExpired.mockReturnValue(false)
+    openaiResponsesAccountService.recordUsage.mockResolvedValue(undefined)
   })
 
   describe('markAccountRateLimited', () => {
@@ -118,6 +124,26 @@ describe('UnifiedOpenAIScheduler', () => {
 
       expect(result.ok).toBe(true)
       expect(result.rank).toBe(2)
+    })
+
+    it('does not route Chat Completions requests to passthrough adapters', () => {
+      const result = unifiedOpenAIScheduler._rankOpenAIResponsesAccount(
+        {
+          providerEndpoint: 'passthrough',
+          boundModel: 'GLM-5-Turbo',
+          modelAliases: ['GLM-5.2']
+        },
+        'GLM-5.2',
+        {
+          endpointKind: 'chat_completions'
+        }
+      )
+
+      expect(result).toEqual({
+        ok: false,
+        reason: 'providerEndpoint passthrough does not support chat_completions',
+        rank: 0
+      })
     })
 
     it('requires image generation support for Images API requests', () => {
@@ -257,6 +283,58 @@ describe('UnifiedOpenAIScheduler', () => {
 
       expect(result).toEqual({ accountId: 'tok-image', accountType: 'openai' })
       expect(openaiAccountService.recordUsage).toHaveBeenCalledWith('tok-image', 0)
+    })
+
+    it('keeps passthrough Claude accounts for non-chat flows but picks vision OpenAI for Chat image requests', async () => {
+      accountGroupService.getGroup.mockResolvedValue({
+        id: 'group-1',
+        name: 'GLM Group',
+        platform: 'openai'
+      })
+      accountGroupService.getGroupMembers.mockResolvedValue(['claude-passthrough', 'vision-chat'])
+      upstreamErrorHelper.isTempUnavailable.mockResolvedValue(false)
+      openaiAccountService.getAccount.mockResolvedValue(null)
+      openaiResponsesAccountService.getAccount.mockImplementation(async (accountId) => {
+        const accounts = {
+          'claude-passthrough': {
+            id: 'claude-passthrough',
+            name: 'GLM-5-Turbo-CLAUDE',
+            isActive: 'true',
+            status: 'active',
+            schedulable: 'true',
+            providerEndpoint: 'passthrough',
+            boundModel: 'GLM-5-Turbo',
+            modelAliases: ['GLM-5.2'],
+            supportsImages: true
+          },
+          'vision-chat': {
+            id: 'vision-chat',
+            name: 'GLM-5V-Turbo-OPENAI',
+            isActive: 'true',
+            status: 'active',
+            schedulable: 'true',
+            providerEndpoint: 'chat_completions',
+            boundModel: 'GLM-5V-Turbo',
+            modelAliases: ['GLM-5.2'],
+            supportsImages: true
+          }
+        }
+        return accounts[accountId] || null
+      })
+
+      const result = await unifiedOpenAIScheduler.selectAccountFromGroup(
+        'group-1',
+        null,
+        'GLM-5.2',
+        null,
+        {
+          endpointKind: 'chat_completions',
+          hasImages: true
+        }
+      )
+
+      expect(result).toEqual({ accountId: 'vision-chat', accountType: 'openai-responses' })
+      expect(openaiResponsesAccountService.recordUsage).toHaveBeenCalledWith('vision-chat', 0)
     })
   })
 })

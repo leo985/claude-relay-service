@@ -19,7 +19,7 @@ describe('openaiCompatible image features', () => {
 
   test('allows explicit adapters for Responses and Chat requests', () => {
     expect(endpointSupportsKind('passthrough', 'passthrough')).toBe(true)
-    expect(endpointSupportsKind('passthrough', 'chat_completions')).toBe(true)
+    expect(endpointSupportsKind('passthrough', 'chat_completions')).toBe(false)
     expect(endpointSupportsKind('passthrough', 'responses')).toBe(true)
     expect(endpointSupportsKind('chat_completions', 'responses')).toBe(true)
     expect(endpointSupportsKind('auto', 'responses')).toBe(true)
