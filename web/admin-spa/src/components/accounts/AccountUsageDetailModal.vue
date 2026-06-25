@@ -96,6 +96,8 @@
               </div>
             </div>
 
+            <AccountExceptionSummaryPanel :exception-summary="exceptionSummary" />
+
             <!-- 今日与峰值 -->
             <div class="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
               <div
@@ -339,6 +341,7 @@ import Chart from 'chart.js/auto'
 import { useThemeStore } from '@/stores/theme'
 
 import { formatNumber } from '@/utils/tools'
+import AccountExceptionSummaryPanel from '@/components/accounts/AccountExceptionSummaryPanel.vue'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
@@ -346,6 +349,7 @@ const props = defineProps({
   history: { type: Array, default: () => [] },
   summary: { type: Object, default: () => ({}) },
   overview: { type: Object, default: () => ({}) },
+  exceptionSummary: { type: Object, default: null },
   generatedAt: { type: String, default: '' },
   loading: { type: Boolean, default: false }
 })
@@ -366,6 +370,7 @@ const platformLabelMap = {
   'openai-responses': 'OpenAI Responses',
   gemini: 'Gemini',
   'gemini-api': 'Gemini API',
+  ccr: 'Claude Console Relay',
   droid: 'Droid',
   bedrock: 'Claude AWS Bedrock'
 }

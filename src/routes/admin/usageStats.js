@@ -14,6 +14,17 @@ const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const CostCalculator = require('../../utils/costCalculator')
 const pricingService = require('../../services/pricingService')
+const {
+  CATEGORY_PRIORITY,
+  classifyCurrentAccountStatus,
+  getExceptionCategoryMeta,
+  normalizeAccountType
+} = require('../../utils/accountExceptionClassifier')
+const {
+  ERROR_STATS_DAYS,
+  ERROR_STATS_PREFIX,
+  TEMP_UNAVAILABLE_PREFIX
+} = require('../../utils/upstreamErrorHelper')
 
 const router = express.Router()
 
@@ -165,6 +176,237 @@ const getApiKeyName = async (keyId) => {
   }
 }
 
+const parseCount = (value) => {
+  const parsed = parseInt(value, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0
+}
+
+const incrementCounter = (map, key, value) => {
+  if (!key || !value) {
+    return
+  }
+  map.set(key, (map.get(key) || 0) + value)
+}
+
+const compareIsoTime = (a, b) => {
+  if (!a) {
+    return b || null
+  }
+  if (!b) {
+    return a
+  }
+  return new Date(a).getTime() >= new Date(b).getTime() ? a : b
+}
+
+const getCategorySortIndex = (key) => {
+  const index = CATEGORY_PRIORITY.indexOf(key)
+  return index === -1 ? CATEGORY_PRIORITY.length : index
+}
+
+const buildExceptionDateWindow = (daysCount) => {
+  const today = new Date()
+  const dateWindow = []
+
+  for (let offset = daysCount - 1; offset >= 0; offset--) {
+    const date = new Date(today)
+    date.setDate(date.getDate() - offset)
+    const dateKey = redis.getDateStringInTimezone(date)
+    const tzDate = redis.getDateInTimezone(date)
+    const monthLabel = String(tzDate.getUTCMonth() + 1).padStart(2, '0')
+    const dayLabel = String(tzDate.getUTCDate()).padStart(2, '0')
+
+    dateWindow.push({
+      date: dateKey,
+      label: `${monthLabel}/${dayLabel}`,
+      key: dateKey
+    })
+  }
+
+  return dateWindow
+}
+
+const getStatsAvailableFromIso = (dateKey) => (dateKey ? `${dateKey}T00:00:00.000Z` : null)
+
+const toTopList = (map, limit = 5) =>
+  Array.from(map.entries())
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, limit)
+
+const getTempUnavailableForAccount = async (accountType, accountId) => {
+  try {
+    const client = redis.getClientSafe()
+    const key = `${TEMP_UNAVAILABLE_PREFIX}:${accountType}:${accountId}`
+    const pipeline = client.pipeline()
+    pipeline.get(key)
+    pipeline.ttl(key)
+    const results = await pipeline.exec()
+    const raw = results?.[0]?.[1]
+    const ttl = results?.[1]?.[1]
+
+    if (!raw || !Number.isFinite(Number(ttl)) || Number(ttl) <= 0) {
+      return null
+    }
+
+    let data = {}
+    try {
+      data = JSON.parse(raw)
+    } catch {
+      data = {}
+    }
+
+    return {
+      ...data,
+      ttl: Number(ttl),
+      remainingSeconds: Number(ttl),
+      expiresAt: data.expiresAt || new Date(Date.now() + Number(ttl) * 1000).toISOString()
+    }
+  } catch (error) {
+    logger.debug(
+      `⚠️ Failed to get temp unavailable status for ${accountType}:${accountId}: ${error.message}`
+    )
+    return null
+  }
+}
+
+const buildAccountExceptionSummary = async ({ accountId, platform, daysCount, accountData }) => {
+  const windowDays = Math.min(Math.max(parseInt(daysCount, 10) || 30, 1), ERROR_STATS_DAYS)
+  const accountType = normalizeAccountType(platform)
+  const dateWindow = buildExceptionDateWindow(windowDays)
+  const statsKeys = dateWindow.map(
+    (item) => `${ERROR_STATS_PREFIX}:${accountType}:${accountId}:${item.key}`
+  )
+  const statsRows = await redis.batchHgetallChunked(statsKeys)
+  const tempUnavailable = await getTempUnavailableForAccount(accountType, accountId)
+  const current = classifyCurrentAccountStatus({
+    ...(accountData || {}),
+    tempUnavailable,
+    temp_unavailable: tempUnavailable
+  })
+
+  const categoryCounts = new Map()
+  const categoryLatestAt = new Map()
+  const statusCounts = new Map()
+  const errorTypeCounts = new Map()
+  const modelCounts = new Map()
+  const pathCounts = new Map()
+  const apiKeyCounts = new Map()
+  const daily = []
+  let total = 0
+  let affectedDays = 0
+  let latestAt = null
+
+  dateWindow.forEach((dateInfo, index) => {
+    const row = statsRows[index] || {}
+    const dayTotal = parseCount(row.total)
+    const dayLatestAt = row.latestAt || null
+    const dailyItem = {
+      date: dateInfo.date,
+      label: dateInfo.label,
+      total: dayTotal,
+      categories: {}
+    }
+
+    if (dayTotal > 0) {
+      total += dayTotal
+      affectedDays += 1
+      latestAt = compareIsoTime(latestAt, dayLatestAt)
+    }
+
+    Object.entries(row).forEach(([field, value]) => {
+      const count = parseCount(value)
+      if (!count) {
+        return
+      }
+
+      if (field.startsWith('type:')) {
+        const category = field.slice('type:'.length) || 'unknown_error'
+        incrementCounter(categoryCounts, category, count)
+        dailyItem.categories[category] = count
+        dailyItem[category] = count
+        categoryLatestAt.set(category, compareIsoTime(categoryLatestAt.get(category), dayLatestAt))
+        return
+      }
+
+      if (field.startsWith('status:')) {
+        incrementCounter(statusCounts, field.slice('status:'.length), count)
+        return
+      }
+
+      if (field.startsWith('errorType:')) {
+        incrementCounter(errorTypeCounts, field.slice('errorType:'.length), count)
+        return
+      }
+
+      if (field.startsWith('model:')) {
+        incrementCounter(modelCounts, field.slice('model:'.length), count)
+        return
+      }
+
+      if (field.startsWith('path:')) {
+        incrementCounter(pathCounts, field.slice('path:'.length), count)
+        return
+      }
+
+      if (field.startsWith('apiKey:')) {
+        incrementCounter(apiKeyCounts, field.slice('apiKey:'.length), count)
+      }
+    })
+
+    daily.push(dailyItem)
+  })
+
+  const byCategory = Array.from(categoryCounts.entries())
+    .map(([key, count]) => {
+      const meta = getExceptionCategoryMeta(key)
+      return {
+        key,
+        label: meta.label,
+        severity: meta.severity,
+        count,
+        percent: total > 0 ? Math.round((count / total) * 10000) / 100 : 0,
+        latestAt: categoryLatestAt.get(key) || null
+      }
+    })
+    .sort(
+      (a, b) =>
+        b.count - a.count ||
+        getCategorySortIndex(a.key) - getCategorySortIndex(b.key) ||
+        a.key.localeCompare(b.key)
+    )
+
+  const byStatusCode = Array.from(statusCounts.entries())
+    .map(([status, count]) => ({ status: Number(status) || status, count }))
+    .sort((a, b) => b.count - a.count || Number(a.status) - Number(b.status))
+
+  const byErrorType = Array.from(errorTypeCounts.entries())
+    .map(([type, count]) => ({ type, count }))
+    .sort((a, b) => b.count - a.count || a.type.localeCompare(b.type))
+
+  return {
+    windowDays,
+    accountType,
+    current,
+    totals: {
+      total,
+      affectedDays,
+      latestAt
+    },
+    byCategory,
+    byStatusCode,
+    byErrorType,
+    daily,
+    topContexts: {
+      models: toTopList(modelCounts),
+      paths: toTopList(pathCounts),
+      apiKeys: toTopList(apiKeyCounts)
+    },
+    recent: [],
+    statsAvailableFrom: getStatsAvailableFromIso(dateWindow[0]?.date),
+    note: total === 0 ? '异常聚合从新版本上线后开始累计' : ''
+  }
+}
+
 // 📊 账户使用统计
 
 // 获取所有账户的使用统计
@@ -243,6 +485,7 @@ router.get('/accounts/:accountId/usage-history', authenticateAdmin, async (req, 
   try {
     const { accountId } = req.params
     const { platform = 'claude', days = 30 } = req.query
+    const includeExceptions = req.query.includeExceptions !== 'false'
 
     const allowedPlatforms = [
       'claude',
@@ -251,6 +494,7 @@ router.get('/accounts/:accountId/usage-history', authenticateAdmin, async (req, 
       'openai-responses',
       'gemini',
       'gemini-api',
+      'ccr',
       'droid',
       'bedrock'
     ]
@@ -262,9 +506,13 @@ router.get('/accounts/:accountId/usage-history', authenticateAdmin, async (req, 
     }
 
     const accountTypeMap = {
+      claude: 'claude-official',
+      'claude-console': 'claude-console',
       openai: 'openai',
       'openai-responses': 'openai-responses',
+      gemini: 'gemini',
       'gemini-api': 'gemini-api',
+      ccr: 'ccr',
       droid: 'droid',
       bedrock: 'bedrock'
     }
@@ -276,6 +524,7 @@ router.get('/accounts/:accountId/usage-history', authenticateAdmin, async (req, 
       'openai-responses': 'gpt-4o-mini-2024-07-18',
       gemini: 'gemini-1.5-flash',
       'gemini-api': 'gemini-2.0-flash',
+      ccr: 'claude-3-5-sonnet-20241022',
       droid: 'unknown',
       bedrock: 'us.anthropic.claude-3-5-sonnet-20241022-v2:0'
     }
@@ -305,6 +554,9 @@ router.get('/accounts/:accountId/usage-history', authenticateAdmin, async (req, 
           accountData = await geminiApiAccountService.getAccount(accountId)
           break
         }
+        case 'ccr':
+          accountData = await ccrAccountService.getAccount(accountId)
+          break
         case 'droid':
           accountData = await droidAccountService.getAccount(accountId)
           break
@@ -477,6 +729,21 @@ router.get('/accounts/:accountId/usage-history', authenticateAdmin, async (req, 
     const avgDailyTokens = actualDaysForAvg > 0 ? totalTokens / actualDaysForAvg : 0
 
     const todayData = history.length > 0 ? history[history.length - 1] : null
+    let exceptionSummary = null
+    if (includeExceptions) {
+      try {
+        exceptionSummary = await buildAccountExceptionSummary({
+          accountId,
+          platform,
+          daysCount,
+          accountData
+        })
+      } catch (error) {
+        logger.warn(
+          `⚠️ Failed to get account exception summary for ${platform}:${accountId}: ${error.message}`
+        )
+      }
+    }
 
     return res.json({
       success: true,
@@ -507,6 +774,7 @@ router.get('/accounts/:accountId/usage-history', authenticateAdmin, async (req, 
           highestRequestDay
         },
         overview: accountUsageStats,
+        exceptionSummary,
         generatedAt: new Date().toISOString()
       }
     })

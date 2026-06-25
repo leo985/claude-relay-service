@@ -12,7 +12,7 @@
               <i class="fas fa-code-branch text-sm text-white sm:text-base" />
             </div>
             <h3 class="text-lg font-bold text-gray-900 dark:text-gray-100 sm:text-xl">
-              {{ isEdit ? '编辑 CCR 账户' : '添加 CCR 账户' }}
+              {{ isEdit ? '编辑 CCR 账户' : templateAccount ? '复制 CCR 账户' : '添加 CCR 账户' }}
             </h3>
           </div>
           <button
@@ -267,6 +267,10 @@ const props = defineProps({
   account: {
     type: Object,
     default: null
+  },
+  templateAccount: {
+    type: Object,
+    default: null
   }
 })
 
@@ -383,9 +387,10 @@ const submit = async () => {
 }
 
 const populateFromAccount = () => {
-  if (!props.account) return
-  const a = props.account
-  form.value.name = a.name || ''
+  // 编辑模式使用 props.account；复制模式使用 props.templateAccount
+  const a = props.account || props.templateAccount
+  if (!a) return
+  form.value.name = props.templateAccount ? (a.name ? a.name + '（副本）' : '') : a.name || ''
   form.value.description = a.description || ''
   form.value.apiUrl = a.apiUrl || ''
   form.value.priority = Number(a.priority || 50)
@@ -407,13 +412,20 @@ const populateFromAccount = () => {
 }
 
 onMounted(() => {
-  if (isEdit.value) populateFromAccount()
+  if (isEdit.value || props.templateAccount) populateFromAccount()
 })
 
 watch(
   () => props.account,
   () => {
     if (isEdit.value) populateFromAccount()
+  }
+)
+
+watch(
+  () => props.templateAccount,
+  () => {
+    if (!isEdit.value && props.templateAccount) populateFromAccount()
   }
 )
 </script>

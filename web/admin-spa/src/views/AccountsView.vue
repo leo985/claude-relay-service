@@ -1396,6 +1396,14 @@
                       <span class="ml-1">编辑</span>
                     </button>
                     <button
+                      class="rounded bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300 dark:hover:bg-emerald-800/50"
+                      title="复制账户"
+                      @click="duplicateAccount(account)"
+                    >
+                      <i class="fas fa-copy" />
+                      <span class="ml-1">复制</span>
+                    </button>
+                    <button
                       class="rounded bg-red-100 px-2.5 py-1 text-xs font-medium text-red-700 transition-colors hover:bg-red-200"
                       title="删除账户"
                       @click="deleteAccount(account)"
@@ -1928,6 +1936,14 @@
             </button>
 
             <button
+              class="flex-1 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-600 transition-colors hover:bg-emerald-100 dark:bg-emerald-900/40 dark:text-emerald-300 dark:hover:bg-emerald-800/50"
+              @click="duplicateAccount(account)"
+            >
+              <i class="fas fa-copy mr-1" />
+              复制
+            </button>
+
+            <button
               class="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 transition-colors hover:bg-red-100"
               @click="deleteAccount(account)"
             >
@@ -2029,12 +2045,14 @@
     <!-- 添加账户模态框 -->
     <AccountForm
       v-if="showCreateAccountModal && (!newAccountPlatform || newAccountPlatform !== 'ccr')"
+      :template-account="templateAccount"
       @close="closeCreateAccountModal"
       @platform-changed="newAccountPlatform = $event"
       @success="handleCreateSuccess"
     />
     <CcrAccountForm
       v-else-if="showCreateAccountModal && newAccountPlatform === 'ccr'"
+      :template-account="templateAccount"
       @close="closeCreateAccountModal"
       @success="handleCreateSuccess"
     />
@@ -2067,6 +2085,7 @@
     <AccountUsageDetailModal
       v-if="showAccountUsageModal"
       :account="selectedAccountForUsage || {}"
+      :exception-summary="accountExceptionSummary"
       :generated-at="accountUsageGeneratedAt"
       :history="accountUsageHistory"
       :loading="accountUsageLoading"
@@ -2400,6 +2419,7 @@ const accountUsageHistory = ref([])
 const accountUsageSummary = ref({})
 const accountUsageOverview = ref({})
 const accountUsageGeneratedAt = ref('')
+const accountExceptionSummary = ref(null)
 
 const supportedUsagePlatforms = [
   'claude',
@@ -2407,6 +2427,7 @@ const supportedUsagePlatforms = [
   'openai',
   'openai-responses',
   'gemini',
+  'ccr',
   'droid',
   'gemini-api',
   'bedrock'
@@ -2574,6 +2595,8 @@ const showCreateAccountModal = ref(false)
 const newAccountPlatform = ref(null) // 跟踪新建账户选择的平台
 const showEditAccountModal = ref(false)
 const editingAccount = ref(null)
+// 复制账户时使用的模板账户（以新增模式打开表单，预填非敏感字段）
+const templateAccount = ref(null)
 
 const collectAccountSearchableStrings = (account) => {
   const values = new Set()
@@ -2708,6 +2731,15 @@ const getAccountActions = (account) => {
     })
   }
 
+  // 复制
+  actions.push({
+    key: 'duplicate',
+    label: '复制',
+    icon: 'fa-copy',
+    color: 'teal',
+    handler: () => duplicateAccount(account)
+  })
+
   // 删除
   actions.push({
     key: 'delete',
@@ -2733,14 +2765,18 @@ const openAccountUsageModal = async (account) => {
   accountUsageSummary.value = {}
   accountUsageOverview.value = {}
   accountUsageGeneratedAt.value = ''
+  accountExceptionSummary.value = null
 
-  const response = await httpApis.getAccountUsageHistoryApi(account.id, account.platform, 30)
+  const response = await httpApis.getAccountUsageHistoryApi(account.id, account.platform, 30, {
+    includeExceptions: true
+  })
   if (response.success) {
     const data = response.data || {}
     accountUsageHistory.value = data.history || []
     accountUsageSummary.value = data.summary || {}
     accountUsageOverview.value = data.overview || {}
     accountUsageGeneratedAt.value = data.generatedAt || ''
+    accountExceptionSummary.value = data.exceptionSummary || null
   } else {
     showToast(response.error || '加载账号使用详情失败', 'error')
   }
@@ -2751,6 +2787,7 @@ const closeAccountUsageModal = () => {
   showAccountUsageModal.value = false
   accountUsageLoading.value = false
   selectedAccountForUsage.value = null
+  accountExceptionSummary.value = null
 }
 
 // 测试账户连通性相关函数
@@ -3950,6 +3987,7 @@ const getRateLimitRemainingMinutes = (account) => {
 // 打开创建账户模态框
 const openCreateAccountModal = () => {
   newAccountPlatform.value = null // 重置选择的平台
+  templateAccount.value = null // 确保普通新建不预填模板
   showCreateAccountModal.value = true
 }
 
@@ -3957,6 +3995,14 @@ const openCreateAccountModal = () => {
 const closeCreateAccountModal = () => {
   showCreateAccountModal.value = false
   newAccountPlatform.value = null
+  templateAccount.value = null
+}
+
+// 复制账户：以新建模式打开表单，预填原账户的配置（敏感凭证需重新填写）
+const duplicateAccount = (account) => {
+  templateAccount.value = account
+  newAccountPlatform.value = account?.platform === 'ccr' ? 'ccr' : null
+  showCreateAccountModal.value = true
 }
 
 // 编辑账户
@@ -4244,6 +4290,7 @@ const toggleSchedulable = async (account) => {
 // 处理创建成功
 const handleCreateSuccess = () => {
   showCreateAccountModal.value = false
+  templateAccount.value = null
   showToast('账户创建成功', 'success')
   // 清空缓存，因为可能涉及分组关系变化
   clearCache()

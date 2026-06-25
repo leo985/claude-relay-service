@@ -230,10 +230,15 @@ export const getClaudeAccountsUsageApi = () =>
   request({ url: '/admin/claude-accounts/usage', method: 'GET' })
 export const getAccountsBindingCountsApi = () =>
   request({ url: '/admin/accounts/binding-counts', method: 'GET' })
-export const getAccountUsageHistoryApi = (id, platform, days = 30) =>
+export const getAccountUsageHistoryApi = (id, platform, days = 30, options = {}) =>
   request({
-    url: `/admin/accounts/${id}/usage-history?platform=${platform}&days=${days}`,
-    method: 'GET'
+    url: `/admin/accounts/${id}/usage-history`,
+    method: 'GET',
+    params: {
+      platform,
+      days,
+      includeExceptions: options.includeExceptions !== false
+    }
   })
 export const getClaudeConsoleAccountUsageApi = (id) =>
   request({ url: `/admin/claude-console-accounts/${id}/usage`, method: 'GET' })

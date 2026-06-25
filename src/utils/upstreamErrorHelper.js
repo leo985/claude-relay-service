@@ -1,10 +1,14 @@
 const logger = require('./logger')
+const { classifyErrorEvent } = require('./accountExceptionClassifier')
 const { normalizeTempUnavailablePolicyFromAccountData } = require('./tempUnavailablePolicy')
 
 const TEMP_UNAVAILABLE_PREFIX = 'temp_unavailable'
 const ERROR_HISTORY_PREFIX = 'error_history'
 const ERROR_HISTORY_MAX = 5000
 const ERROR_HISTORY_TTL = 3 * 24 * 60 * 60 // 3天
+const ERROR_STATS_PREFIX = 'account_error_stats:daily'
+const ERROR_STATS_DAYS = 60
+const ERROR_STATS_TTL = ERROR_STATS_DAYS * 24 * 60 * 60
 
 // 默认 TTL（秒）
 const DEFAULT_TTL = {
@@ -164,6 +168,124 @@ const classifyError = (statusCode) => {
   return null
 }
 
+const getErrorStatsKey = (accountType, accountId, dateKey) =>
+  `${ERROR_STATS_PREFIX}:${accountType}:${accountId}:${dateKey}`
+
+const getDateKeyInTimezone = (date = new Date()) => {
+  const redis = getRedis()
+  return typeof redis.getDateStringInTimezone === 'function'
+    ? redis.getDateStringInTimezone(date)
+    : date.toISOString().slice(0, 10)
+}
+
+const getErrorStatsKeysForRange = (accountType, accountId, days = ERROR_STATS_DAYS) => {
+  const safeDays = Math.min(Math.max(parseInt(days, 10) || ERROR_STATS_DAYS, 1), ERROR_STATS_DAYS)
+  const today = new Date()
+  const keys = []
+
+  for (let offset = 0; offset < safeDays; offset++) {
+    const date = new Date(today)
+    date.setDate(date.getDate() - offset)
+    keys.push(getErrorStatsKey(accountType, accountId, getDateKeyInTimezone(date)))
+  }
+
+  return keys
+}
+
+const normalizeStatsDimension = (value, maxLength = 180) => {
+  if (value === undefined || value === null) {
+    return null
+  }
+
+  let text = typeof value === 'string' ? value : String(value)
+  text = text
+    .replace(/[\r\n\t\0]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!text) {
+    return null
+  }
+
+  return text.slice(0, maxLength)
+}
+
+const normalizePathDimension = (value, maxLength = 220) => {
+  const text = normalizeStatsDimension(value, maxLength)
+  if (!text) {
+    return null
+  }
+
+  try {
+    if (/^https?:\/\//i.test(text)) {
+      const url = new URL(text)
+      return normalizeStatsDimension(url.pathname || '/', maxLength)
+    }
+  } catch {
+    // Fall through to simple query/hash stripping for non-standard URL values.
+  }
+
+  return normalizeStatsDimension(text.split('?')[0].split('#')[0], maxLength)
+}
+
+const pickContextDimension = (context, fields, maxLength, normalizer = normalizeStatsDimension) => {
+  if (!context || typeof context !== 'object') {
+    return null
+  }
+
+  for (const field of fields) {
+    const normalized = normalizer(context[field], maxLength)
+    if (normalized) {
+      return normalized
+    }
+  }
+
+  return null
+}
+
+const appendErrorStatsToPipeline = ({
+  pipeline,
+  accountId,
+  accountType,
+  statusCode,
+  errorType,
+  context,
+  now
+}) => {
+  const dateKey = getDateKeyInTimezone(now)
+  const statsKey = getErrorStatsKey(accountType, accountId, dateKey)
+  const category = classifyErrorEvent({ statusCode, errorType, context }) || 'unknown_error'
+  const normalizedStatus = Number(statusCode)
+  const normalizedErrorType = normalizeStatsDimension(errorType, 120)
+  const model = pickContextDimension(context, ['model', 'requestedModel', 'upstreamModel'], 160)
+  const path = pickContextDimension(
+    context,
+    ['path', 'endpoint', 'url'],
+    220,
+    normalizePathDimension
+  )
+  const apiKey = pickContextDimension(context, ['apiKeyName', 'keyName', 'apiKeyId'], 160)
+
+  pipeline.hincrby(statsKey, 'total', 1)
+  pipeline.hincrby(statsKey, `type:${category}`, 1)
+  if (Number.isFinite(normalizedStatus) && normalizedStatus > 0) {
+    pipeline.hincrby(statsKey, `status:${Math.floor(normalizedStatus)}`, 1)
+  }
+  if (normalizedErrorType) {
+    pipeline.hincrby(statsKey, `errorType:${normalizedErrorType}`, 1)
+  }
+  if (model) {
+    pipeline.hincrby(statsKey, `model:${model}`, 1)
+  }
+  if (path) {
+    pipeline.hincrby(statsKey, `path:${path}`, 1)
+  }
+  if (apiKey) {
+    pipeline.hincrby(statsKey, `apiKey:${apiKey}`, 1)
+  }
+  pipeline.hset(statsKey, 'latestAt', now.toISOString())
+  pipeline.expire(statsKey, ERROR_STATS_TTL)
+}
+
 // 解析 429 响应头中的重置时间（返回秒数）
 const parseRetryAfter = (headers) => {
   if (!headers) {
@@ -222,9 +344,10 @@ const recordErrorHistory = async (
     const redis = getRedis()
     const client = redis.getClientSafe()
     const redisKey = `${ERROR_HISTORY_PREFIX}:${accountType}:${accountId}`
+    const now = new Date()
 
     const entry = JSON.stringify({
-      time: new Date().toISOString(),
+      time: now.toISOString(),
       status: statusCode,
       errorType,
       context: context
@@ -244,6 +367,15 @@ const recordErrorHistory = async (
     pipeline.lpush(redisKey, entry)
     pipeline.ltrim(redisKey, 0, ERROR_HISTORY_MAX - 1)
     pipeline.expire(redisKey, ERROR_HISTORY_TTL)
+    appendErrorStatsToPipeline({
+      pipeline,
+      accountId,
+      accountType,
+      statusCode,
+      errorType,
+      context,
+      now
+    })
     await pipeline.exec()
   } catch (err) {
     logger.warn(`⚠️ [ErrorHistory] Failed to record error history for ${accountId}: ${err.message}`)
@@ -280,7 +412,11 @@ const clearErrorHistory = async (accountType, accountId) => {
     const redis = getRedis()
     const client = redis.getClientSafe()
     const redisKey = `${ERROR_HISTORY_PREFIX}:${accountType}:${accountId}`
-    await client.del(redisKey)
+    const statsKeys = getErrorStatsKeysForRange(accountType, accountId)
+    const pipeline = client.pipeline()
+    pipeline.del(redisKey)
+    statsKeys.forEach((key) => pipeline.del(key))
+    await pipeline.exec()
   } catch (error) {
     logger.error(`❌ [ErrorHistory] Failed to clear error history for ${accountId}:`, error)
   }
@@ -507,5 +643,10 @@ module.exports = {
   getErrorHistory,
   clearErrorHistory,
   TEMP_UNAVAILABLE_PREFIX,
-  ERROR_HISTORY_PREFIX
+  ERROR_HISTORY_PREFIX,
+  ERROR_STATS_PREFIX,
+  ERROR_STATS_DAYS,
+  ERROR_STATS_TTL,
+  getErrorStatsKey,
+  getErrorStatsKeysForRange
 }

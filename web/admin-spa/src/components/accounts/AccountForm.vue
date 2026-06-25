@@ -4375,8 +4375,16 @@ const props = defineProps({
   account: {
     type: Object,
     default: null
+  },
+  // 复制账户时传入的模板账户：以新增模式打开，但预填模板中的非敏感字段
+  templateAccount: {
+    type: Object,
+    default: null
   }
 })
+
+// 编辑模式使用 account；复制模式使用 templateAccount 作为表单数据来源
+const sourceAccount = computed(() => props.account || props.templateAccount)
 
 const emit = defineEmits(['close', 'success', 'platform-changed'])
 
@@ -4946,13 +4954,12 @@ const modelMappings = ref([])
 
 // 初始化模型映射表
 const initModelMappings = () => {
-  if (props.account?.supportedModels) {
+  // 编辑模式使用 props.account，复制模式使用 props.templateAccount
+  const account = sourceAccount.value
+  if (account?.supportedModels) {
     // 如果是对象格式（新的映射表）
-    if (
-      typeof props.account.supportedModels === 'object' &&
-      !Array.isArray(props.account.supportedModels)
-    ) {
-      const entries = Object.entries(props.account.supportedModels)
+    if (typeof account.supportedModels === 'object' && !Array.isArray(account.supportedModels)) {
+      const entries = Object.entries(account.supportedModels)
 
       // 判断是白名单模式还是映射模式
       // 如果所有映射都是"映射到自己"，则视为白名单模式
@@ -4969,12 +4976,12 @@ const initModelMappings = () => {
         modelMappings.value = entries.map(([from, to]) => ({ from, to }))
         // 不填充 allowedModels，因为映射模式不使用白名单复选框
       }
-    } else if (Array.isArray(props.account.supportedModels)) {
+    } else if (Array.isArray(account.supportedModels)) {
       // 如果是数组格式（旧格式），转换为白名单模式
       modelRestrictionMode.value = 'whitelist'
-      allowedModels.value = props.account.supportedModels
+      allowedModels.value = account.supportedModels
       // 同时设置 modelMappings 为自映射
-      modelMappings.value = props.account.supportedModels.map((model) => ({
+      modelMappings.value = account.supportedModels.map((model) => ({
         from: model,
         to: model
       }))
@@ -6919,10 +6926,12 @@ const convertMappingsToObject = () => {
 }
 
 // 监听账户变化，更新表单
+// 编辑模式监听 props.account；复制模式（无 account）监听 props.templateAccount
 watch(
-  () => props.account,
+  () => sourceAccount.value,
   (newAccount) => {
     if (newAccount) {
+      const isCopy = !props.account && !!props.templateAccount
       initModelMappings()
       // 重新初始化代理配置
       const proxyConfig = normalizeProxyFormState(newAccount.proxy)
@@ -6965,7 +6974,7 @@ watch(
       form.value = {
         platform: newAccount.platform,
         addType: derivedAddType,
-        name: newAccount.name,
+        name: isCopy ? (newAccount.name ? newAccount.name + '（副本）' : '') : newAccount.name,
         description: newAccount.description || '',
         accountType: newAccount.accountType || 'shared',
         subscriptionType: subscriptionType,
@@ -7247,8 +7256,8 @@ onMounted(() => {
   // 初始化平台分组
   platformGroup.value = determinePlatformGroup(form.value.platform)
 
-  // 初始化模型映射表（如果是编辑模式）
-  if (isEdit.value) {
+  // 初始化模型映射表（编辑模式或复制模式）
+  if (isEdit.value || props.templateAccount) {
     initModelMappings()
   }
 
