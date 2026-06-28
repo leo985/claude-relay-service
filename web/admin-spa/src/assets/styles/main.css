@@ -7,7 +7,7 @@
 /* Font Awesome 图标 */
 @import '@fortawesome/fontawesome-free/css/all.css';
 
-/* 全局样式 */
+/* 全局样式 - 对齐 smart-hub-ui 扁平化设计 */
 body {
   font-family:
     'Inter',
@@ -16,113 +16,78 @@ body {
     'Segoe UI',
     Roboto,
     sans-serif;
-  background: linear-gradient(
-    135deg,
-    var(--primary-color) 0%,
-    var(--secondary-color) 50%,
-    var(--accent-color) 100%
-  );
+  background: var(--bg-gradient-start);
   background-attachment: fixed;
   min-height: 100vh;
   margin: 0;
   overflow-x: hidden;
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease;
 }
 
-body::before {
-  content: '';
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background:
-    radial-gradient(circle at 20% 80%, rgba(var(--accent-rgb), 0.2) 0%, transparent 50%),
-    radial-gradient(circle at 80% 20%, rgba(var(--primary-rgb), 0.2) 0%, transparent 50%),
-    radial-gradient(circle at 40% 40%, rgba(var(--secondary-rgb), 0.1) 0%, transparent 50%);
-  pointer-events: none;
-  z-index: -1;
-}
-
-/* 通用transition - 仅应用于特定元素 */
-body,
-div,
+/* 仅对交互元素应用 transition */
 button,
 input,
 select,
-textarea,
-table,
-tr,
-td,
-th,
-span,
-p,
-h1,
-h2,
-h3,
-h4,
-h5,
-h6 {
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+textarea {
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    color 0.2s ease;
 }
 
-/* Element Plus 主题覆盖 */
+/* Element Plus 主题覆盖 - 扁平化 */
 .el-button--primary {
-  background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
-  border-color: transparent;
+  background: var(--primary-color);
+  border-color: var(--primary-color);
 }
 
 .el-button--primary:hover,
 .el-button--primary:focus {
-  background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
-  opacity: 0.9;
+  background: #4338ca;
+  border-color: #4338ca;
+  opacity: 1;
 }
 
 /* 自定义滚动条样式 */
 .custom-scrollbar {
   scrollbar-width: thin;
-  scrollbar-color: rgba(var(--primary-rgb), 0.3) rgba(var(--primary-rgb), 0.05);
+  scrollbar-color: rgba(var(--primary-rgb), 0.3) transparent;
 }
 
 .custom-scrollbar::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 .custom-scrollbar::-webkit-scrollbar-track {
-  background: rgba(var(--primary-rgb), 0.05);
+  background: transparent;
   border-radius: 10px;
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: linear-gradient(
-    135deg,
-    rgba(var(--primary-rgb), 0.4) 0%,
-    rgba(var(--secondary-rgb), 0.4) 100%
-  );
+  background: rgba(var(--primary-rgb), 0.3);
   border-radius: 10px;
-  transition: background 0.3s ease;
+  transition: background 0.2s ease;
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: linear-gradient(
-    135deg,
-    rgba(var(--primary-rgb), 0.6) 0%,
-    rgba(var(--secondary-rgb), 0.6) 100%
-  );
+  background: rgba(var(--primary-rgb), 0.5);
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb:active {
-  background: linear-gradient(
-    135deg,
-    rgba(var(--primary-rgb), 0.8) 0%,
-    rgba(var(--secondary-rgb), 0.8) 100%
-  );
+  background: rgba(var(--primary-rgb), 0.7);
 }
 
 /* Vue过渡动画 */
 .fade-enter-active,
 .fade-leave-active {
-  transition: opacity 0.3s ease;
+  transition: opacity 0.2s ease;
 }
 
 .fade-enter-from,
@@ -132,17 +97,17 @@ h6 {
 
 .slide-up-enter-active,
 .slide-up-leave-active {
-  transition: all 0.3s ease;
+  transition: all 0.2s ease;
 }
 
 .slide-up-enter-from {
   opacity: 0;
-  transform: translateY(30px);
+  transform: translateY(20px);
 }
 
 .slide-up-leave-to {
   opacity: 0;
-  transform: translateY(-30px);
+  transform: translateY(-20px);
 }
 
 /* 响应式调整 */
@@ -150,7 +115,7 @@ h6 {
   .glass,
   .glass-strong {
     margin: 0;
-    border-radius: 16px;
+    border-radius: 12px;
   }
 
   .stat-card {
@@ -159,7 +124,7 @@ h6 {
 
   .tab-btn {
     font-size: 14px;
-    padding: 12px 8px;
+    padding: 10px 8px;
   }
 
   .modal-scroll-content {

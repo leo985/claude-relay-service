@@ -330,6 +330,8 @@ router.post('/', authenticateAdmin, async (req, res) => {
       groupIds, // 支持多分组
       rateLimitDuration,
       priority,
+      supportsImages,
+      supportsImageGeneration,
       needsImmediateRefresh, // 是否需要立即刷新
       requireRefreshSuccess // 是否必须刷新成功才能创建
     } = req.body
@@ -352,6 +354,8 @@ router.post('/', authenticateAdmin, async (req, res) => {
       openaiOauth: openaiOauth || {},
       accountInfo: accountInfo || {},
       proxy: proxy || null,
+      supportsImages,
+      supportsImageGeneration,
       isActive: true,
       schedulable: true
     }

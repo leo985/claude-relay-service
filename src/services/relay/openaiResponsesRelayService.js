@@ -91,6 +91,17 @@ function emptyUsageSummary() {
   }
 }
 
+const TIMEOUT_ERROR_CODES = new Set(['ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ECONNABORTED'])
+const RETRYABLE_NETWORK_ERROR_CODES = new Set([
+  'ETIMEDOUT',
+  'ESOCKETTIMEDOUT',
+  'ECONNABORTED',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'EAI_AGAIN',
+  'ENOTFOUND'
+])
+
 class OpenAIResponsesRelayService {
   constructor() {
     this.defaultTimeout = config.requestTimeout || 600000
@@ -110,6 +121,81 @@ class OpenAIResponsesRelayService {
     await openaiResponsesAccountService.updateAccount(accountId, {
       lastUsedAt: new Date().toISOString()
     })
+  }
+
+  _isTimeoutError(error) {
+    if (!error) {
+      return false
+    }
+    if (TIMEOUT_ERROR_CODES.has(error.code)) {
+      return true
+    }
+    return /timeout|timed out/i.test(error.message || '')
+  }
+
+  _isClientAbortError(error) {
+    if (!error) {
+      return false
+    }
+    if (error.code === 'ERR_CANCELED') {
+      return true
+    }
+    return /canceled|cancelled|client aborted|aborted by client/i.test(error.message || '')
+  }
+
+  _isRetryableNetworkError(error) {
+    if (!error || error.response || this._isClientAbortError(error)) {
+      return false
+    }
+    return RETRYABLE_NETWORK_ERROR_CODES.has(error.code) || this._isTimeoutError(error)
+  }
+
+  _buildNetworkErrorResponse(error) {
+    if (this._isTimeoutError(error)) {
+      return {
+        status: 504,
+        body: {
+          error: {
+            message: 'Request timeout',
+            type: 'timeout_error',
+            code: 'upstream_timeout'
+          }
+        }
+      }
+    }
+
+    return {
+      status: 502,
+      body: {
+        error: {
+          message: 'Upstream network error',
+          type: 'upstream_error',
+          code: 'upstream_network_error'
+        }
+      }
+    }
+  }
+
+  async _markRetryableNetworkFailures(failures = []) {
+    const markedAccountIds = new Set()
+    for (const failure of failures) {
+      const account = failure?.account
+      const accountId = account?.id
+      if (!accountId || markedAccountIds.has(accountId)) {
+        continue
+      }
+      markedAccountIds.add(accountId)
+
+      const oaiAutoProtectionDisabled =
+        account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+      if (oaiAutoProtectionDisabled) {
+        continue
+      }
+
+      await upstreamErrorHelper
+        .markTempUnavailable(accountId, 'openai-responses', failure.statusCode || 503)
+        .catch(() => {})
+    }
   }
 
   resolveUpstreamRequest(req, fullAccount) {
@@ -483,8 +569,19 @@ class OpenAIResponsesRelayService {
   }
 
   // 处理请求转发
-  async handleRequest(req, res, account, apiKeyData) {
+  async handleRequest(req, res, account, apiKeyData, options = {}) {
     let abortController = null
+    let handleClientDisconnect = null
+    const retryAttempt = Number.isInteger(options.retryAttempt) ? options.retryAttempt : 0
+    const maxNetworkRetries = Number.isInteger(options.maxNetworkRetries)
+      ? options.maxNetworkRetries
+      : 0
+    const failedAccountIds = Array.isArray(options.failedAccountIds)
+      ? options.failedAccountIds.filter(Boolean)
+      : []
+    const pendingNetworkFailures = Array.isArray(options.pendingNetworkFailures)
+      ? options.pendingNetworkFailures
+      : []
     // 获取会话哈希（如果有的话）
     const sessionId = req.headers['session_id'] || req.body?.session_id
     const sessionHash = sessionId
@@ -504,7 +601,7 @@ class OpenAIResponsesRelayService {
       abortController = new AbortController()
 
       // 设置客户端断开监听器
-      const handleClientDisconnect = () => {
+      handleClientDisconnect = () => {
         logger.info('🔌 Client disconnected, aborting OpenAI-Responses request')
         if (abortController && !abortController.signal.aborted) {
           abortController.abort()
@@ -592,14 +689,17 @@ class OpenAIResponsesRelayService {
         }
 
         // 返回错误响应（使用处理后的数据，避免循环引用）
-        const errorResponse = errorData || {
-          error: {
-            message: 'Rate limit exceeded',
-            type: 'rate_limit_error',
-            code: 'rate_limit_exceeded',
-            resets_in_seconds: resetsInSeconds
-          }
-        }
+        const errorResponse = upstreamErrorHelper.sanitizeErrorForClient(
+          errorData || {
+            error: {
+              message: 'Rate limit exceeded',
+              type: 'rate_limit_error',
+              code: 'rate_limit_exceeded',
+              resets_in_seconds: resetsInSeconds
+            }
+          },
+          { statusCode: 429, retryAfterSeconds: resetsInSeconds }
+        )
         return res.status(429).json(errorResponse)
       }
 
@@ -692,7 +792,11 @@ class OpenAIResponsesRelayService {
           req.removeListener('close', handleClientDisconnect)
           res.removeListener('close', handleClientDisconnect)
 
-          return res.status(401).json(unauthorizedResponse)
+          return res
+            .status(401)
+            .json(
+              upstreamErrorHelper.sanitizeErrorForClient(unauthorizedResponse, { statusCode: 401 })
+            )
         }
 
         // 处理 5xx 上游错误
@@ -724,7 +828,9 @@ class OpenAIResponsesRelayService {
 
         return res
           .status(response.status)
-          .json(upstreamErrorHelper.sanitizeErrorForClient(errorData))
+          .json(
+            upstreamErrorHelper.sanitizeErrorForClient(errorData, { statusCode: response.status })
+          )
       }
 
       // 更新最后使用时间（节流）
@@ -761,6 +867,10 @@ class OpenAIResponsesRelayService {
       if (abortController && !abortController.signal.aborted) {
         abortController.abort()
       }
+      if (handleClientDisconnect) {
+        req.removeListener('close', handleClientDisconnect)
+        res.removeListener('close', handleClientDisconnect)
+      }
 
       // 安全地记录错误，避免循环引用
       const errorInfo = {
@@ -771,16 +881,61 @@ class OpenAIResponsesRelayService {
       }
       logger.error('OpenAI-Responses relay error:', errorInfo)
 
+      const isRetryableNetworkError = this._isRetryableNetworkError(error)
+      const networkErrorResponse = isRetryableNetworkError
+        ? this._buildNetworkErrorResponse(error)
+        : null
+
       // 检查是否是网络错误
-      if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-        if (account?.id) {
-          const oaiAutoProtectionDisabled =
-            account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
-          if (!oaiAutoProtectionDisabled) {
-            await upstreamErrorHelper
-              .markTempUnavailable(account.id, 'openai-responses', 503)
-              .catch(() => {})
+      const nextPendingNetworkFailures = isRetryableNetworkError
+        ? [
+            ...pendingNetworkFailures,
+            {
+              account,
+              statusCode: networkErrorResponse?.status || 503
+            }
+          ]
+        : pendingNetworkFailures
+
+      if (isRetryableNetworkError) {
+        if (sessionHash) {
+          await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+        }
+      }
+
+      const nextFailedAccountIds = [...new Set([...failedAccountIds, account?.id].filter(Boolean))]
+      const canRetryNetworkError =
+        isRetryableNetworkError &&
+        !res.headersSent &&
+        !res.writableEnded &&
+        !res.destroyed &&
+        retryAttempt < maxNetworkRetries &&
+        typeof options.selectRetryAccount === 'function'
+
+      if (canRetryNetworkError) {
+        try {
+          const retryAccount = await options.selectRetryAccount({
+            error,
+            failedAccount: account,
+            failedAccountIds: nextFailedAccountIds,
+            retryAttempt
+          })
+
+          if (retryAccount?.id && !nextFailedAccountIds.includes(retryAccount.id)) {
+            logger.warn(
+              `🔁 Retrying OpenAI-Responses request after network error (${error.code || error.message}) with account ${retryAccount.name || retryAccount.id}`
+            )
+            return await this.handleRequest(req, res, retryAccount, apiKeyData, {
+              ...options,
+              retryAttempt: retryAttempt + 1,
+              failedAccountIds: nextFailedAccountIds,
+              pendingNetworkFailures: nextPendingNetworkFailures
+            })
           }
+
+          logger.warn('🔁 OpenAI-Responses retry skipped: no alternate account available')
+        } catch (retryError) {
+          logger.warn('🔁 OpenAI-Responses retry selection failed:', retryError)
         }
       }
 
@@ -867,10 +1022,22 @@ class OpenAIResponsesRelayService {
             }
           }
 
-          return res.status(401).json(unauthorizedResponse)
+          return res
+            .status(401)
+            .json(
+              upstreamErrorHelper.sanitizeErrorForClient(unauthorizedResponse, { statusCode: 401 })
+            )
         }
 
-        return res.status(status).json(upstreamErrorHelper.sanitizeErrorForClient(errorData))
+        return res
+          .status(status)
+          .json(upstreamErrorHelper.sanitizeErrorForClient(errorData, { statusCode: status }))
+      }
+
+      if (networkErrorResponse) {
+        // 重试成功时不污染异常面板；只有请求级重试耗尽后才记录冷却和异常统计。
+        await this._markRetryableNetworkFailures(nextPendingNetworkFailures)
+        return res.status(networkErrorResponse.status).json(networkErrorResponse.body)
       }
 
       // 其他错误
@@ -878,7 +1045,7 @@ class OpenAIResponsesRelayService {
         error: {
           message: 'Internal server error',
           type: 'internal_error',
-          details: error.message
+          code: 'internal_error'
         }
       })
     }

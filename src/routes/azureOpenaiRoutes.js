@@ -274,16 +274,14 @@ router.post('/chat/completions', authenticateApiKey, async (req, res) => {
 
     if (!res.headersSent) {
       const statusCode = error.response?.status || 500
-      const errorMessage =
-        error.response?.data?.error?.message || error.message || 'Internal server error'
-
-      res.status(statusCode).json({
-        error: {
-          message: errorMessage,
-          type: 'azure_openai_error',
-          code: error.code || 'unknown'
-        }
-      })
+      res
+        .status(statusCode)
+        .json(
+          upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+            statusCode,
+            error.response?.data || error
+          )
+        )
     }
   }
 })
@@ -405,16 +403,14 @@ router.post('/responses', authenticateApiKey, async (req, res) => {
 
     if (!res.headersSent) {
       const statusCode = error.response?.status || 500
-      const errorMessage =
-        error.response?.data?.error?.message || error.message || 'Internal server error'
-
-      res.status(statusCode).json({
-        error: {
-          message: errorMessage,
-          type: 'azure_openai_error',
-          code: error.code || 'unknown'
-        }
-      })
+      res
+        .status(statusCode)
+        .json(
+          upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+            statusCode,
+            error.response?.data || error
+          )
+        )
     }
   }
 })
@@ -509,16 +505,14 @@ router.post('/embeddings', authenticateApiKey, async (req, res) => {
 
     if (!res.headersSent) {
       const statusCode = error.response?.status || 500
-      const errorMessage =
-        error.response?.data?.error?.message || error.message || 'Internal server error'
-
-      res.status(statusCode).json({
-        error: {
-          message: errorMessage,
-          type: 'azure_openai_error',
-          code: error.code || 'unknown'
-        }
-      })
+      res
+        .status(statusCode)
+        .json(
+          upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+            statusCode,
+            error.response?.data || error
+          )
+        )
     }
   }
 })

@@ -2144,8 +2144,15 @@
             <!-- OpenAI token 账号：图片生成能力开关 -->
             <div
               v-if="form.platform === 'openai'"
-              class="rounded-lg border border-gray-200 p-3 dark:border-gray-700"
+              class="space-y-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700"
             >
+              <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                <input v-model="form.supportsImages" type="checkbox" />
+                支持图片输入
+              </label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                开启后该 Codex CLI 账号可承接带图片的 Claude /v1/messages fallback。
+              </p>
               <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
                 <input v-model="form.supportsImageGeneration" type="checkbox" />
                 支持图片生成
@@ -3182,8 +3189,15 @@
           <!-- OpenAI token 账号：图片生成能力开关（编辑模式） -->
           <div
             v-if="form.platform === 'openai'"
-            class="rounded-lg border border-gray-200 p-3 dark:border-gray-700"
+            class="space-y-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700"
           >
+            <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+              <input v-model="form.supportsImages" type="checkbox" />
+              支持图片输入
+            </label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              开启后该 Codex CLI 账号可承接带图片的 Claude /v1/messages fallback。
+            </p>
             <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
               <input v-model="form.supportsImageGeneration" type="checkbox" />
               支持图片生成
@@ -4736,7 +4750,10 @@ const form = ref({
     ? props.account.modelAliases.join('\n')
     : '',
   supportsTools: props.account?.supportsTools !== false,
-  supportsImages: props.account?.supportsImages || false,
+  supportsImages:
+    props.account?.supportsImages !== undefined
+      ? props.account.supportsImages
+      : props.account?.platform === 'openai',
   supportsReasoning: props.account?.supportsReasoning || false,
   supportsImageGeneration: props.account?.supportsImageGeneration || false,
   imageBoundModel: props.account?.imageBoundModel || '',
@@ -5619,6 +5636,7 @@ const handleOAuthSuccess = async (tokenInfoOrList) => {
       data.openaiOauth = tokenInfo.tokens || tokenInfo
       data.accountInfo = tokenInfo.accountInfo
       data.priority = form.value.priority || 50
+      data.supportsImages = !!form.value.supportsImages
       data.supportsImageGeneration = !!form.value.supportsImageGeneration
     } else if (currentPlatform === 'droid') {
       const rawTokens = tokenInfo.tokens || tokenInfo || {}
@@ -5992,6 +6010,7 @@ const createAccount = async () => {
       data.needsImmediateRefresh = true
       data.requireRefreshSuccess = true // 必须刷新成功才能创建账户
       data.priority = form.value.priority || 50
+      data.supportsImages = !!form.value.supportsImages
       data.supportsImageGeneration = !!form.value.supportsImageGeneration
     } else if (form.value.platform === 'droid') {
       data.priority = form.value.priority || 50
@@ -6364,6 +6383,7 @@ const updateAccount = async () => {
     // OpenAI 账号优先级更新
     if (props.account.platform === 'openai') {
       data.priority = form.value.priority || 50
+      data.supportsImages = !!form.value.supportsImages
       data.supportsImageGeneration = !!form.value.supportsImageGeneration
     }
 
@@ -6702,6 +6722,9 @@ watch(
     } else if (newPlatform === 'openai') {
       // 切换到 OpenAI 时，使用 OAuth 作为默认方式
       form.value.addType = 'oauth'
+      if (!isEdit.value) {
+        form.value.supportsImages = true
+      }
     } else if (newPlatform === 'gemini-api' || newPlatform === 'azure_openai') {
       // 切换到 Gemini API 或 Azure OpenAI 时，使用 apikey 模式（直接创建，不需要 OAuth 流程）
       form.value.addType = 'apikey'

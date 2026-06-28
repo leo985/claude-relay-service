@@ -24,6 +24,7 @@ jest.mock('../src/services/scheduler/unifiedOpenAIScheduler', () => ({
 jest.mock('../src/utils/upstreamErrorHelper', () => ({
   markTempUnavailable: mockMarkTempUnavailable.mockResolvedValue(undefined),
   parseRetryAfter: jest.fn(() => null),
+  buildSafeUpstreamErrorForClient: jest.fn((_status, error) => error),
   sanitizeErrorForClient: mockSanitize
 }))
 jest.mock('../src/utils/requestDetailHelper', () => ({
@@ -82,7 +83,7 @@ function createRes() {
   const res = {
     statusCode: 200,
     headersSent: false,
-    status: jest.fn(function (code) {
+    status: jest.fn((code) => {
       res.statusCode = code
       return res
     }),

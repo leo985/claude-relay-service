@@ -138,14 +138,14 @@ router.get('/v1/models/:model', authenticateApiKey, async (req, res) => {
       }
     }
 
-    // 从 model_pricing.json 获取模型信息
+    // 从价格服务获取模型信息
     const modelData = pricingService.getModelPricing(modelId)
 
     // 构建标准 OpenAI 格式的模型响应
     let modelInfo
 
     if (modelData) {
-      // 如果在 pricing 文件中找到了模型
+      // 如果在价格数据中找到了模型
       modelInfo = {
         id: modelId,
         object: 'model',

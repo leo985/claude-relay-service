@@ -479,11 +479,12 @@ router.post('/openai-responses-accounts/:accountId/test', authenticateAdmin, asy
     }
 
     // 构造测试请求（根据 providerEndpoint 和 baseApi 决定端点路径）
-    const baseUrl = account.baseApi || 'https://api.openai.com'
+    const baseUrl = (account.baseApi || 'https://api.openai.com').replace(/\/+$/, '')
     const providerEndpoint = account.providerEndpoint || 'responses'
     let endpointPath = providerEndpoint === 'chat_completions' ? '/chat/completions' : '/responses'
-    // 防止 baseApi 已含 /v1 时路径重复
-    if (!baseUrl.endsWith('/v1')) {
+    // 只有当 baseApi 不含 API 版本段（如 /v1、/v3、/api/v3 等）时才追加 /v1，避免路径重复
+    const hasVersionSegment = /\/(v\d+|api\/v\d+)$/i.test(baseUrl)
+    if (!hasVersionSegment) {
       endpointPath = `/v1${endpointPath}`
     }
     const apiUrl = `${baseUrl}${endpointPath}`

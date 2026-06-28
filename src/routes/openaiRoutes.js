@@ -14,6 +14,7 @@ const apiKeyService = require('../services/apiKeyService')
 const redis = require('../models/redis')
 const crypto = require('crypto')
 const ProxyHelper = require('../utils/proxyHelper')
+const upstreamErrorHelper = require('../utils/upstreamErrorHelper')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const { IncrementalSSEParser } = require('../utils/sseParser')
 const { getSafeMessage } = require('../utils/errorSanitizer')
@@ -22,6 +23,7 @@ const {
   extractOpenAICacheReadTokens
 } = require('../utils/requestDetailHelper')
 const requestBodyRuleService = require('../services/requestBodyRuleService')
+const CodexToOpenAIConverter = require('../services/codexToOpenAI')
 const {
   clonePlainObject,
   detectEndpointKindFromPath,
@@ -55,6 +57,52 @@ function normalizeHeaders(headers = {}) {
     normalized[key.toLowerCase()] = Array.isArray(value) ? value[0] : value
   }
   return normalized
+}
+
+function recordOpenAIRateLimitHistory({ accountId, account, req, apiKeyData, model, errorBody }) {
+  if (!accountId) {
+    return
+  }
+
+  // disableAutoProtection accounts already record inside openaiAccountService.
+  if (account?.disableAutoProtection === true || account?.disableAutoProtection === 'true') {
+    return
+  }
+
+  upstreamErrorHelper
+    .recordErrorHistory(accountId, 'openai', 429, 'rate_limit', {
+      model,
+      path: req?.originalUrl || req?.path,
+      apiKeyName: apiKeyData?.name || apiKeyData?.id,
+      apiKeyId: apiKeyData?.id,
+      errorBody
+    })
+    .catch((error) => {
+      logger.warn(
+        `⚠️ Failed to record OpenAI rate-limit history for ${accountId}: ${error.message}`
+      )
+    })
+}
+
+async function readUpstreamErrorData(data) {
+  if (!data || typeof data.on !== 'function') {
+    return data
+  }
+
+  const chunks = []
+  await new Promise((resolve) => {
+    data.on('data', (chunk) => chunks.push(chunk))
+    data.on('end', resolve)
+    data.on('error', resolve)
+    setTimeout(resolve, 5000)
+  })
+
+  const raw = Buffer.concat(chunks).toString()
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return { error: { message: raw || 'Unknown upstream error' } }
+  }
 }
 
 function toNumberSafe(value) {
@@ -439,10 +487,15 @@ const handleResponses = async (req, res) => {
       req._openaiCompatibleOriginal?.endpointKind === 'chat_completions'
         ? req._openaiCompatibleOriginal.body
         : req.body
+    const detectedRequestFeatures = getRequestFeaturesFromBody(featureBody || {}, endpointKind)
     const requestFeatures = {
-      ...getRequestFeaturesFromBody(featureBody || {}, endpointKind),
+      ...detectedRequestFeatures,
       endpointKind,
-      openaiResponsesOnly: req._forceOpenAICompatibleRelay === true
+      openaiResponsesOnly: req._forceOpenAICompatibleRelay === true,
+      allowOpenAITokenForOpenAICompatibleImages:
+        req._forceOpenAICompatibleRelay === true &&
+        endpointKind === 'chat_completions' &&
+        detectedRequestFeatures.hasImages === true
     }
 
     if (schedulerModel !== requestedModel) {
@@ -459,10 +512,58 @@ const handleResponses = async (req, res) => {
       requestFeatures
     ))
 
+    const shouldAdaptTokenResponsesToChat =
+      accountType === 'openai' &&
+      req._forceOpenAICompatibleRelay === true &&
+      req._openaiCompatibleOriginal?.endpointKind === 'chat_completions'
+    const tokenResponseClientModel =
+      req._openaiCompatibleOriginal?.body?.model || requestedModel || schedulerModel
+
     // 如果是 OpenAI-Responses 账户，使用专门的中继服务处理
     if (accountType === 'openai-responses') {
       logger.info(`🔀 Using OpenAI-Responses relay service for account: ${account.name}`)
-      return await openaiResponsesRelayService.handleRequest(req, res, account, apiKeyData)
+      const openaiBinding = apiKeyData.openaiAccountId || ''
+      const canRetryWithAlternateAccount = !openaiBinding.startsWith('responses:')
+      const relayOptions = canRetryWithAlternateAccount
+        ? {
+            maxNetworkRetries: 1,
+            selectRetryAccount: async ({ failedAccountIds }) => {
+              if (sessionHash) {
+                await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+              }
+
+              const retryFeatures = {
+                ...requestFeatures,
+                openaiResponsesOnly: true,
+                excludeAccountIds: failedAccountIds
+              }
+              const retrySelection = await getOpenAIAuthToken(
+                apiKeyData,
+                sessionId,
+                schedulerModel,
+                retryFeatures
+              )
+
+              if (
+                retrySelection?.accountType !== 'openai-responses' ||
+                !retrySelection.account ||
+                failedAccountIds.includes(retrySelection.account.id)
+              ) {
+                return null
+              }
+
+              return retrySelection.account
+            }
+          }
+        : {}
+
+      return await openaiResponsesRelayService.handleRequest(
+        req,
+        res,
+        account,
+        apiKeyData,
+        relayOptions
+      )
     }
 
     if (schedulerModel !== requestedModel) {
@@ -598,15 +699,26 @@ const handleResponses = async (req, res) => {
         sessionHash,
         resetsInSeconds
       )
+      recordOpenAIRateLimitHistory({
+        accountId,
+        account,
+        req,
+        apiKeyData,
+        model: upstreamRequestedModel,
+        errorBody: errorData
+      })
 
       // 返回错误响应给客户端
-      const errorResponse = errorData || {
-        error: {
-          type: 'usage_limit_reached',
-          message: 'The usage limit has been reached',
-          resets_in_seconds: resetsInSeconds
-        }
-      }
+      const errorResponse = upstreamErrorHelper.sanitizeErrorForClient(
+        errorData || {
+          error: {
+            type: 'usage_limit_reached',
+            message: 'The usage limit has been reached',
+            resets_in_seconds: resetsInSeconds
+          }
+        },
+        { statusCode: 429, retryAfterSeconds: resetsInSeconds }
+      )
 
       if (isStream) {
         // 流式响应也需要设置正确的状态码
@@ -686,18 +798,9 @@ const handleResponses = async (req, res) => {
         )
       }
 
-      let errorResponse = errorData
-      if (!errorResponse || typeof errorResponse !== 'object' || Buffer.isBuffer(errorResponse)) {
-        const fallbackMessage =
-          typeof errorData === 'string' && errorData.trim() ? errorData.trim() : 'Unauthorized'
-        errorResponse = {
-          error: {
-            message: fallbackMessage,
-            type: 'unauthorized',
-            code: 'unauthorized'
-          }
-        }
-      }
+      const errorResponse = upstreamErrorHelper.sanitizeErrorForClient(errorData, {
+        statusCode: unauthorizedStatus
+      })
 
       res.status(unauthorizedStatus).json(errorResponse)
       return
@@ -734,6 +837,16 @@ const handleResponses = async (req, res) => {
       }
     }
 
+    if (isStream && upstream.status >= 400) {
+      const errorData = await readUpstreamErrorData(upstream.data)
+      const errorResponse = upstreamErrorHelper.sanitizeErrorForClient(errorData, {
+        statusCode: upstream.status
+      })
+      res.write(`data: ${JSON.stringify(errorResponse)}\n\n`)
+      res.end()
+      return
+    }
+
     if (isStream) {
       // 立即刷新响应头，开始 SSE
       if (typeof res.flushHeaders === 'function') {
@@ -755,10 +868,14 @@ const handleResponses = async (req, res) => {
 
         // 直接获取完整响应
         const responseData = upstream.data
+        const responseObject =
+          responseData?.type === 'response.completed' && responseData.response
+            ? responseData.response
+            : responseData
 
         // 从响应中获取实际的 model 和 usage
-        actualModel = responseData.model || upstreamRequestedModel || 'gpt-4'
-        usageData = responseData.usage
+        actualModel = responseObject?.model || upstreamRequestedModel || 'gpt-4'
+        usageData = responseObject?.usage
 
         logger.debug(`📊 Non-stream response - Model: ${actualModel}, Usage:`, usageData)
 
@@ -816,8 +933,27 @@ const handleResponses = async (req, res) => {
           })
         }
 
+        if (shouldAdaptTokenResponsesToChat && upstream.status >= 200 && upstream.status < 300) {
+          try {
+            const converter = new CodexToOpenAIConverter()
+            res.json(converter.convertResponse(responseData, tokenResponseClientModel))
+          } catch (error) {
+            logger.warn('Failed to convert token Responses payload to Chat Completions:', error)
+            res.json(responseData)
+          }
+          return
+        }
+
         // 返回响应
-        res.json(responseData)
+        if (upstream.status >= 400) {
+          res.json(
+            upstreamErrorHelper.sanitizeErrorForClient(responseData, {
+              statusCode: upstream.status
+            })
+          )
+        } else {
+          res.json(responseData)
+        }
         return
       } catch (error) {
         logger.error('Failed to process non-stream response:', error)
@@ -830,6 +966,8 @@ const handleResponses = async (req, res) => {
 
     // 使用增量 SSE 解析器
     const sseParser = new IncrementalSSEParser()
+    const tokenChatConverter = shouldAdaptTokenResponsesToChat ? new CodexToOpenAIConverter() : null
+    const tokenChatStreamState = tokenChatConverter ? tokenChatConverter.createStreamState() : null
 
     // 处理解析出的事件
     const processSSEEvent = (eventData) => {
@@ -862,17 +1000,33 @@ const handleResponses = async (req, res) => {
 
     upstream.data.on('data', (chunk) => {
       try {
-        // 转发数据给客户端
-        if (!res.destroyed) {
-          res.write(chunk)
-        }
-
         // 使用增量解析器处理数据
         const events = sseParser.feed(chunk.toString())
         for (const event of events) {
           if (event.type === 'data' && event.data) {
             processSSEEvent(event.data)
+            if (tokenChatConverter && !res.destroyed) {
+              if (event.data.error) {
+                for (const item of tokenChatConverter.convertErrorToOpenAISSE(event.data)) {
+                  res.write(item)
+                }
+              } else {
+                const converted = tokenChatConverter.convertStreamChunk(
+                  event.data,
+                  tokenResponseClientModel,
+                  tokenChatStreamState
+                )
+                for (const item of converted) {
+                  res.write(item)
+                }
+              }
+            }
           }
+        }
+
+        // 转发数据给客户端
+        if (!tokenChatConverter && !res.destroyed) {
+          res.write(chunk)
         }
       } catch (error) {
         logger.error('Error processing OpenAI stream chunk:', error)
@@ -887,6 +1041,22 @@ const handleResponses = async (req, res) => {
         for (const event of events) {
           if (event.type === 'data' && event.data) {
             processSSEEvent(event.data)
+            if (tokenChatConverter && !res.destroyed) {
+              if (event.data.error) {
+                for (const item of tokenChatConverter.convertErrorToOpenAISSE(event.data)) {
+                  res.write(item)
+                }
+              } else {
+                const converted = tokenChatConverter.convertStreamChunk(
+                  event.data,
+                  tokenResponseClientModel,
+                  tokenChatStreamState
+                )
+                for (const item of converted) {
+                  res.write(item)
+                }
+              }
+            }
           }
         }
       }
@@ -973,6 +1143,19 @@ const handleResponses = async (req, res) => {
           sessionHash,
           rateLimitResetsInSeconds
         )
+        recordOpenAIRateLimitHistory({
+          accountId,
+          account,
+          req,
+          apiKeyData,
+          model: actualModel || upstreamRequestedModel,
+          errorBody: {
+            error: {
+              type: 'rate_limit',
+              resets_in_seconds: rateLimitResetsInSeconds
+            }
+          }
+        })
       } else if (upstream.status === 200) {
         // 流式请求成功，检查并移除限流状态
         const isRateLimited = await unifiedOpenAIScheduler.isAccountRateLimited(accountId)
@@ -984,6 +1167,9 @@ const handleResponses = async (req, res) => {
         }
       }
 
+      if (tokenChatConverter && !res.destroyed) {
+        res.write('data: [DONE]\n\n')
+      }
       res.end()
     })
 
@@ -1187,7 +1373,37 @@ const handleImageEdits = async (req, res) => {
   }
 }
 
+const handleModels = async (req, res) => {
+  try {
+    const modelService = require('../services/modelService')
+    const models = await modelService.getAllModels()
+    const restrictedModels = Array.isArray(req.apiKey?.restrictedModels)
+      ? req.apiKey.restrictedModels
+      : []
+
+    let filteredModels = models
+    if (req.apiKey?.enableModelRestriction && restrictedModels.length > 0) {
+      filteredModels = models.filter((model) => !restrictedModels.includes(model.id))
+    }
+
+    return res.json({
+      object: 'list',
+      data: filteredModels
+    })
+  } catch (error) {
+    logger.error('Failed to get OpenAI models list:', error)
+    return res.status(500).json({
+      error: {
+        message: 'Failed to retrieve models',
+        type: 'server_error',
+        code: 'internal_error'
+      }
+    })
+  }
+}
+
 // 注册两个路由路径，都使用相同的处理函数
+router.get('/v1/models', authenticateApiKey, handleModels)
 router.post('/responses', authenticateApiKey, handleResponses)
 router.post('/v1/responses', authenticateApiKey, handleResponses)
 router.post('/responses/compact', authenticateApiKey, handleResponses)
@@ -1265,4 +1481,5 @@ module.exports = router
 module.exports.handleResponses = handleResponses
 module.exports.handleImageGenerations = handleImageGenerations
 module.exports.handleImageEdits = handleImageEdits
+module.exports.handleModels = handleModels
 module.exports.CODEX_CLI_INSTRUCTIONS = CODEX_CLI_INSTRUCTIONS

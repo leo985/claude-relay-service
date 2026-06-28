@@ -212,7 +212,9 @@ class OpenAIImageRelayService {
       errorData
     })
 
-    return res.status(response.status).json(upstreamErrorHelper.sanitizeErrorForClient(errorData))
+    return res
+      .status(response.status)
+      .json(upstreamErrorHelper.sanitizeErrorForClient(errorData, { statusCode: response.status }))
   }
 
   async _getFullAccount(account) {
@@ -339,13 +341,25 @@ class OpenAIImageRelayService {
         return res.end()
       }
 
-      return res.status(error.statusCode || error.response?.status || 500).json({
-        error: {
-          message: error.message || 'Internal server error',
-          type: error.code || 'api_error',
-          code: error.code || 'internal_error'
-        }
-      })
+      if (error.statusCode && !error.response) {
+        return res.status(error.statusCode).json({
+          error: {
+            message: error.message || 'Invalid request',
+            type: error.code || 'invalid_request_error',
+            code: error.code || 'invalid_request'
+          }
+        })
+      }
+
+      const status =
+        error.statusCode ||
+        error.response?.status ||
+        (error.code === 'ETIMEDOUT' ? 504 : error.code === 'ECONNREFUSED' ? 502 : 500)
+      return res
+        .status(status)
+        .json(
+          upstreamErrorHelper.buildSafeUpstreamErrorForClient(status, error.response?.data || error)
+        )
     } finally {
       if (handleClientDisconnect) {
         req.removeListener('aborted', handleClientDisconnect)
@@ -467,13 +481,25 @@ class OpenAIImageRelayService {
         return res.end()
       }
 
-      return res.status(error.statusCode || error.response?.status || 500).json({
-        error: {
-          message: error.message || 'Internal server error',
-          type: error.code || 'api_error',
-          code: error.code || 'internal_error'
-        }
-      })
+      if (error.statusCode && !error.response) {
+        return res.status(error.statusCode).json({
+          error: {
+            message: error.message || 'Invalid request',
+            type: error.code || 'invalid_request_error',
+            code: error.code || 'invalid_request'
+          }
+        })
+      }
+
+      const status =
+        error.statusCode ||
+        error.response?.status ||
+        (error.code === 'ETIMEDOUT' ? 504 : error.code === 'ECONNREFUSED' ? 502 : 500)
+      return res
+        .status(status)
+        .json(
+          upstreamErrorHelper.buildSafeUpstreamErrorForClient(status, error.response?.data || error)
+        )
     } finally {
       if (handleClientDisconnect) {
         req.removeListener('aborted', handleClientDisconnect)

@@ -247,9 +247,7 @@ function endpointSupportsKind(providerEndpoint = 'responses', endpointKind = 're
   }
   if (endpointKind === 'chat_completions') {
     return (
-      protocol === 'responses' ||
-      protocol === 'chat_completions' ||
-      normalizedEndpoint === 'auto'
+      protocol === 'responses' || protocol === 'chat_completions' || normalizedEndpoint === 'auto'
     )
   }
   return protocol === 'passthrough'

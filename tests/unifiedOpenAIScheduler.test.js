@@ -336,5 +336,153 @@ describe('UnifiedOpenAIScheduler', () => {
       expect(result).toEqual({ accountId: 'vision-chat', accountType: 'openai-responses' })
       expect(openaiResponsesAccountService.recordUsage).toHaveBeenCalledWith('vision-chat', 0)
     })
+
+    it('allows Codex token accounts for Anthropic image fallback when image input is enabled', async () => {
+      accountGroupService.getGroup.mockResolvedValue({
+        id: 'group-1',
+        name: 'Claude Image Fallback',
+        platform: 'openai'
+      })
+      accountGroupService.getGroupMembers.mockResolvedValue(['gpt-beiming'])
+      upstreamErrorHelper.isTempUnavailable.mockResolvedValue(false)
+      openaiAccountService.isTokenExpired.mockReturnValue(false)
+      openaiAccountService.recordUsage.mockResolvedValue(undefined)
+      openaiAccountService.getAccount.mockResolvedValue({
+        id: 'gpt-beiming',
+        name: 'GPT-BEIMING',
+        isActive: 'true',
+        status: 'active',
+        schedulable: 'true',
+        supportsImages: true
+      })
+      openaiResponsesAccountService.getAccount.mockResolvedValue(null)
+
+      const result = await unifiedOpenAIScheduler.selectAccountFromGroup(
+        'group-1',
+        null,
+        'glm-5.2',
+        null,
+        {
+          endpointKind: 'passthrough',
+          hasImages: true,
+          openaiResponsesOnly: true,
+          allowOpenAITokenForAnthropicImages: true
+        }
+      )
+
+      expect(result).toEqual({ accountId: 'gpt-beiming', accountType: 'openai' })
+      expect(openaiAccountService.recordUsage).toHaveBeenCalledWith('gpt-beiming', 0)
+    })
+
+    it('allows Codex token accounts for forced OpenAI-compatible Chat image requests', async () => {
+      accountGroupService.getGroup.mockResolvedValue({
+        id: 'group-1',
+        name: 'OpenAI Image Group',
+        platform: 'openai'
+      })
+      accountGroupService.getGroupMembers.mockResolvedValue(['gpt-beiming'])
+      upstreamErrorHelper.isTempUnavailable.mockResolvedValue(false)
+      openaiAccountService.isTokenExpired.mockReturnValue(false)
+      openaiAccountService.recordUsage.mockResolvedValue(undefined)
+      openaiAccountService.getAccount.mockResolvedValue({
+        id: 'gpt-beiming',
+        name: 'GPT-BEIMING',
+        isActive: 'true',
+        status: 'active',
+        schedulable: 'true',
+        supportsImages: true
+      })
+      openaiResponsesAccountService.getAccount.mockResolvedValue(null)
+
+      const result = await unifiedOpenAIScheduler.selectAccountFromGroup(
+        'group-1',
+        null,
+        'glm-5.2',
+        null,
+        {
+          endpointKind: 'chat_completions',
+          hasImages: true,
+          openaiResponsesOnly: true,
+          allowOpenAITokenForOpenAICompatibleImages: true
+        }
+      )
+
+      expect(result).toEqual({ accountId: 'gpt-beiming', accountType: 'openai' })
+      expect(openaiAccountService.recordUsage).toHaveBeenCalledWith('gpt-beiming', 0)
+    })
+
+    it('does not allow Codex token accounts for forced OpenAI-compatible text requests', async () => {
+      accountGroupService.getGroup.mockResolvedValue({
+        id: 'group-1',
+        name: 'OpenAI Text Group',
+        platform: 'openai'
+      })
+      accountGroupService.getGroupMembers.mockResolvedValue(['gpt-beiming'])
+      openaiAccountService.getAccount.mockResolvedValue({
+        id: 'gpt-beiming',
+        name: 'GPT-BEIMING',
+        isActive: 'true',
+        status: 'active',
+        schedulable: 'true',
+        supportsImages: true
+      })
+      openaiResponsesAccountService.getAccount.mockResolvedValue(null)
+
+      await expect(
+        unifiedOpenAIScheduler.selectAccountFromGroup('group-1', null, 'glm-5.2', null, {
+          endpointKind: 'chat_completions',
+          hasImages: false,
+          openaiResponsesOnly: true,
+          allowOpenAITokenForOpenAICompatibleImages: true
+        })
+      ).rejects.toMatchObject({
+        statusCode: 402,
+        skipReasons: [
+          expect.objectContaining({
+            accountId: 'gpt-beiming',
+            accountType: 'openai',
+            reason: 'openai_responses_required'
+          })
+        ]
+      })
+    })
+
+    it('skips Codex token accounts for Anthropic image fallback when image input is disabled', async () => {
+      accountGroupService.getGroup.mockResolvedValue({
+        id: 'group-1',
+        name: 'Claude Image Fallback',
+        platform: 'openai'
+      })
+      accountGroupService.getGroupMembers.mockResolvedValue(['gpt-beiming'])
+      upstreamErrorHelper.isTempUnavailable.mockResolvedValue(false)
+      openaiAccountService.isTokenExpired.mockReturnValue(false)
+      openaiAccountService.getAccount.mockResolvedValue({
+        id: 'gpt-beiming',
+        name: 'GPT-BEIMING',
+        isActive: 'true',
+        status: 'active',
+        schedulable: 'true',
+        supportsImages: false
+      })
+      openaiResponsesAccountService.getAccount.mockResolvedValue(null)
+
+      await expect(
+        unifiedOpenAIScheduler.selectAccountFromGroup('group-1', null, 'glm-5.2', null, {
+          endpointKind: 'passthrough',
+          hasImages: true,
+          openaiResponsesOnly: true,
+          allowOpenAITokenForAnthropicImages: true
+        })
+      ).rejects.toMatchObject({
+        statusCode: 402,
+        skipReasons: [
+          expect.objectContaining({
+            accountId: 'gpt-beiming',
+            accountType: 'openai',
+            reason: 'images_not_supported'
+          })
+        ]
+      })
+    })
   })
 })

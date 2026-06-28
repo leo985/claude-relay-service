@@ -17,12 +17,15 @@ const claudeAccountService = require('../services/account/claudeAccountService')
 const claudeConsoleAccountService = require('../services/account/claudeConsoleAccountService')
 const openaiResponsesRelayService = require('../services/relay/openaiResponsesRelayService')
 const openaiResponsesAccountService = require('../services/account/openaiResponsesAccountService')
+const openaiAccountService = require('../services/account/openaiAccountService')
+const openaiTokenAnthropicRelayService = require('../services/relay/openaiTokenAnthropicRelayService')
 const {
   isWarmupRequest,
   buildMockWarmupResponse,
   sendMockWarmupStream
 } = require('../utils/warmupInterceptor')
 const { sanitizeUpstreamError } = require('../utils/errorSanitizer')
+const upstreamErrorHelper = require('../utils/upstreamErrorHelper')
 const { dumpAnthropicMessagesRequest } = require('../utils/anthropicRequestDump')
 const { createRequestDetailMeta } = require('../utils/requestDetailHelper')
 const {
@@ -144,11 +147,13 @@ function hasOpenAIResponsesFallbackBinding(apiKeyData) {
 
 function getAnthropicPassthroughFeatures(body = {}) {
   const features = getRequestFeaturesFromBody(body, 'passthrough')
+  const allowOpenAITokenForAnthropicImages = features.hasImages === true
   return {
     ...features,
     endpointKind: 'passthrough',
     hasReasoning: features.hasReasoning || body.thinking !== undefined,
-    openaiResponsesOnly: true
+    openaiResponsesOnly: true,
+    allowOpenAITokenForAnthropicImages
   }
 }
 
@@ -170,10 +175,24 @@ async function fallbackToOpenAIResponses({ req, res, sessionHash, requestedModel
       getAnthropicPassthroughFeatures(req.body)
     )
 
-    if (!selection?.accountId || selection.accountType !== 'openai-responses') {
+    if (!selection?.accountId || !['openai-responses', 'openai'].includes(selection.accountType)) {
       const error = new Error('OpenAI-Responses fallback did not select a compatible account')
       error.statusCode = 402
       throw error
+    }
+
+    if (selection.accountType === 'openai') {
+      const openaiAccount = await openaiAccountService.getAccount(selection.accountId)
+      if (!openaiAccount) {
+        const error = new Error(`OpenAI account ${selection.accountId} not found`)
+        error.statusCode = 404
+        throw error
+      }
+      logger.info(
+        `🔀${label} Falling back to OpenAI token account: ${openaiAccount.name} (${selection.accountId}) for image /v1/messages`
+      )
+      await openaiTokenAnthropicRelayService.handleRequest(req, res, openaiAccount, req.apiKey)
+      return true
     }
 
     const responsesAccount = await openaiResponsesAccountService.getAccount(selection.accountId)
@@ -857,10 +876,12 @@ async function handleMessagesRequest(req, res) {
         } catch (error) {
           logger.error('❌ Bedrock stream request failed:', error)
           if (!res.headersSent) {
-            const statusCode = error.$metadata?.httpStatusCode || 500
-            return res
-              .status(statusCode)
-              .json({ error: 'Bedrock service error', message: error.message })
+            const statusCode = error.statusCode || error.$metadata?.httpStatusCode || 500
+            return res.status(statusCode).json(
+              upstreamErrorHelper.buildSafeUpstreamErrorForClient(statusCode, error, {
+                format: 'anthropic'
+              })
+            )
           }
           // SSE 流已开始但出错：确保连接被关闭，防止客户端 pending
           if (!res.writableEnded) {
@@ -1278,11 +1299,15 @@ async function handleMessagesRequest(req, res) {
           }
         } catch (error) {
           logger.error('❌ Bedrock non-stream request failed:', error)
-          const statusCode = error.$metadata?.httpStatusCode || 500
+          const statusCode = error.statusCode || error.$metadata?.httpStatusCode || 500
           response = {
             statusCode,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ error: 'Bedrock service error', message: error.message }),
+            body: JSON.stringify(
+              upstreamErrorHelper.buildSafeUpstreamErrorForClient(statusCode, error, {
+                format: 'anthropic'
+              })
+            ),
             accountId
           }
         }
@@ -1549,6 +1574,16 @@ async function handleMessagesRequest(req, res) {
         errorType = 'Upstream hostname resolution failed'
       }
 
+      if (errorType.startsWith('Upstream') || handledError.response) {
+        return res.status(statusCode).json({
+          ...upstreamErrorHelper.buildSafeUpstreamErrorForClient(statusCode, handledError, {
+            format: 'anthropic'
+          }),
+          timestamp: new Date().toISOString(),
+          relay_error: errorType
+        })
+      }
+
       return res.status(statusCode).json({
         error: errorType,
         message: handledError.message || 'An unexpected error occurred',
@@ -1634,8 +1669,8 @@ router.get('/v1/models', authenticateApiKey, async (req, res) => {
 
     const modelService = require('../services/modelService')
 
-    // 从 modelService 获取所有支持的模型
-    const models = modelService.getAllModels()
+    // 从 modelService 获取所有支持的模型（优先使用页面配置，回退到默认列表）
+    const models = await modelService.getAllModels()
 
     // 可选：根据 API Key 的模型限制过滤
     let filteredModels = models

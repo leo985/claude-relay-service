@@ -114,7 +114,8 @@ const RESPONSES_REQUEST_FEATURES = {
   hasImages: false,
   hasImageGeneration: false,
   hasReasoning: false,
-  openaiResponsesOnly: false
+  openaiResponsesOnly: false,
+  allowOpenAITokenForOpenAICompatibleImages: false
 }
 
 function createReq({

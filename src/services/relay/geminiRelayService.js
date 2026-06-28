@@ -3,6 +3,7 @@ const ProxyHelper = require('../../utils/proxyHelper')
 const logger = require('../../utils/logger')
 const config = require('../../../config/config')
 const apiKeyService = require('../apiKeyService')
+const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 
 // Gemini API 配置
 const GEMINI_API_BASE = 'https://cloudcode.googleapis.com/v1'
@@ -215,11 +216,9 @@ async function* handleStreamResponse(
       logger.info('Stream request was aborted by client')
     } else {
       logger.error('Stream processing error:', error)
+      const safeError = upstreamErrorHelper.buildSafeUpstreamErrorForClient(502, error).error
       yield `data: ${JSON.stringify({
-        error: {
-          message: error.message,
-          type: 'stream_error'
-        }
+        error: safeError
       })}\n\n`
     }
   }
@@ -357,23 +356,20 @@ async function sendGeminiRequest({
 
     // 转换错误格式
     if (error.response) {
-      const geminiError = error.response.data?.error
-      const err = new Error(geminiError?.message || 'Gemini API request failed')
+      const safePayload = upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+        error.response.status,
+        error.response.data || error
+      )
+      const err = new Error(safePayload.error.message)
       err.status = error.response.status
-      err.error = {
-        message: geminiError?.message || 'Gemini API request failed',
-        type: geminiError?.code || 'api_error',
-        code: geminiError?.code
-      }
+      err.error = safePayload.error
       throw err
     }
 
-    const err = new Error(error.message)
-    err.status = 500
-    err.error = {
-      message: error.message,
-      type: 'network_error'
-    }
+    const safePayload = upstreamErrorHelper.buildSafeUpstreamErrorForClient(502, error)
+    const err = new Error(safePayload.error.message)
+    err.status = 502
+    err.error = safePayload.error
     throw err
   }
 }
@@ -544,28 +540,20 @@ async function countTokens({
 
     // 转换错误格式
     if (error.response) {
-      const geminiError = error.response.data?.error
-      const errorObj = new Error(
-        geminiError?.message ||
-          `Gemini countTokens API request failed (Status: ${error.response.status})`
+      const safePayload = upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+        error.response.status,
+        error.response.data || error
       )
+      const errorObj = new Error(safePayload.error.message)
       errorObj.status = error.response.status
-      errorObj.error = {
-        message:
-          geminiError?.message ||
-          `Gemini countTokens API request failed (Status: ${error.response.status})`,
-        type: geminiError?.code || 'api_error',
-        code: geminiError?.code
-      }
+      errorObj.error = safePayload.error
       throw errorObj
     }
 
-    const errorObj = new Error(error.message)
-    errorObj.status = 500
-    errorObj.error = {
-      message: error.message,
-      type: 'network_error'
-    }
+    const safePayload = upstreamErrorHelper.buildSafeUpstreamErrorForClient(502, error)
+    const errorObj = new Error(safePayload.error.message)
+    errorObj.status = 502
+    errorObj.error = safePayload.error
     throw errorObj
   }
 }

@@ -57,7 +57,15 @@ jest.mock('../src/services/relay/openaiResponsesRelayService', () => ({
   handleRequest: jest.fn()
 }))
 
+jest.mock('../src/services/relay/openaiTokenAnthropicRelayService', () => ({
+  handleRequest: jest.fn()
+}))
+
 jest.mock('../src/services/account/openaiResponsesAccountService', () => ({
+  getAccount: jest.fn()
+}))
+
+jest.mock('../src/services/account/openaiAccountService', () => ({
   getAccount: jest.fn()
 }))
 
@@ -101,6 +109,8 @@ jest.mock('../src/utils/logger', () => ({
 const unifiedClaudeScheduler = require('../src/services/scheduler/unifiedClaudeScheduler')
 const unifiedOpenAIScheduler = require('../src/services/scheduler/unifiedOpenAIScheduler')
 const openaiResponsesRelayService = require('../src/services/relay/openaiResponsesRelayService')
+const openaiTokenAnthropicRelayService = require('../src/services/relay/openaiTokenAnthropicRelayService')
+const openaiAccountService = require('../src/services/account/openaiAccountService')
 const { handleMessagesRequest } = require('../src/routes/api')
 
 function createReq() {
@@ -184,5 +194,55 @@ describe('/v1/messages OpenAI-Responses fallback', () => {
       error: 'Relay service error',
       message: 'No available Claude accounts'
     })
+  })
+
+  it('routes image Claude fallback to OpenAI token accounts when selected', async () => {
+    const claudeError = new Error('No available Claude accounts')
+    claudeError.statusCode = 402
+    unifiedClaudeScheduler.selectAccountForApiKey.mockRejectedValue(claudeError)
+    unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValue({
+      accountId: 'openai-token-1',
+      accountType: 'openai'
+    })
+    openaiAccountService.getAccount.mockResolvedValue({
+      id: 'openai-token-1',
+      name: 'GPT-BEIMING',
+      supportsImages: true
+    })
+    openaiTokenAnthropicRelayService.handleRequest.mockImplementation(async (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    const req = createReq()
+    req.body.messages[0].content = [
+      { type: 'text', text: 'describe' },
+      {
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/png', data: 'abc' }
+      }
+    ]
+
+    const res = createRes()
+    await handleMessagesRequest(req, res)
+
+    expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(String),
+      'claude-3-5-sonnet',
+      expect.objectContaining({
+        endpointKind: 'passthrough',
+        hasImages: true,
+        openaiResponsesOnly: true,
+        allowOpenAITokenForAnthropicImages: true
+      })
+    )
+    expect(openaiTokenAnthropicRelayService.handleRequest).toHaveBeenCalledWith(
+      req,
+      res,
+      expect.objectContaining({ id: 'openai-token-1' }),
+      req.apiKey
+    )
+    expect(openaiResponsesRelayService.handleRequest).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(200)
   })
 })

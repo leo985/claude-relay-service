@@ -9,6 +9,18 @@ export const getModelPricingStatusApi = () =>
   request({ url: '/admin/models/pricing/status', method: 'GET' })
 export const refreshModelPricingApi = () =>
   request({ url: '/admin/models/pricing/refresh', method: 'POST' })
+export const updateModelPricingApi = (data) =>
+  request({ url: '/admin/models/pricing/model', method: 'PUT', data })
+export const deleteModelPricingApi = (data) =>
+  request({ url: '/admin/models/pricing/model', method: 'DELETE', data })
+
+// 模型列表配置
+export const getModelsConfigApi = (config) =>
+  request({ url: '/admin/models/config', method: 'GET', ...config })
+export const updateModelsConfigApi = (data, config) =>
+  request({ url: '/admin/models/config', method: 'PUT', data, ...config })
+export const resetModelsConfigApi = (config) =>
+  request({ url: '/admin/models/config', method: 'DELETE', ...config })
 
 // API Stats
 export const getKeyIdApi = (apiKey) =>

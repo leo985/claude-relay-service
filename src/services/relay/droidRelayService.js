@@ -391,10 +391,10 @@ class DroidRelayService {
           statusCode: error.response.status,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(
-            error.response.data || {
-              error: 'upstream_error',
-              message: error.message
-            }
+            upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+              error.response.status,
+              error.response.data || error
+            )
           )
         }
       }
@@ -564,10 +564,9 @@ class DroidRelayService {
               })
             }
             if (!clientResponse.headersSent) {
-              clientResponse.status(res.statusCode).json({
-                error: 'upstream_error',
-                details: body
-              })
+              clientResponse
+                .status(res.statusCode)
+                .json(upstreamErrorHelper.buildSafeUpstreamErrorForClient(res.statusCode, body))
             }
             resolveOnce({ statusCode: res.statusCode, streaming: true })
           })
@@ -1542,20 +1541,10 @@ class DroidRelayService {
   }
 
   _buildNetworkErrorBody(error) {
-    const body = {
-      error: 'relay_upstream_failure',
-      message: error?.message || '上游请求失败'
-    }
-
-    if (error?.code) {
-      body.code = error.code
-    }
-
-    if (error?.config?.url) {
-      body.upstream = error.config.url
-    }
-
-    return body
+    return upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+      this._mapNetworkErrorStatus(error),
+      error
+    )
   }
 
   /**

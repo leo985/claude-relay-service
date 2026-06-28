@@ -1,13 +1,40 @@
 :root {
-  --primary-color: #667eea;
-  --secondary-color: #764ba2;
-  --accent-color: #f093fb;
+  /* 主色调 - 对齐 smart-hub-ui 的靛蓝色系 */
+  --primary-color: #4f46e5; /* indigo-600 */
+  --primary-rgb: 79, 70, 229;
+  --secondary-color: #6366f1; /* indigo-500 */
+  --secondary-rgb: 99, 102, 241;
+  --accent-color: #818cf8; /* indigo-400 */
+  --accent-rgb: 129, 140, 248;
   --success-color: #10b981;
   --warning-color: #f59e0b;
   --error-color: #ef4444;
-  --surface-color: rgba(255, 255, 255, 0.95);
-  --glass-color: rgba(255, 255, 255, 0.1);
-  --text-primary: #1f2937;
-  --text-secondary: #6b7280;
-  --border-color: rgba(255, 255, 255, 0.2);
+
+  /* 表面/背景色 - 扁平化，去除透明度 */
+  --surface-color: #ffffff;
+  --glass-color: #ffffff;
+  --glass-strong-color: #ffffff;
+
+  /* 文本色 */
+  --text-primary: #111827; /* gray-900 */
+  --text-secondary: #6b7280; /* gray-500 */
+
+  /* 边框色 - 实色细边框 */
+  --border-color: #e5e7eb; /* gray-200 */
+
+  /* 背景色 - 浅灰 */
+  --bg-gradient-start: #f9fafb; /* gray-50 */
+  --bg-gradient-mid: #f9fafb;
+  --bg-gradient-end: #f9fafb;
+
+  /* 输入框 */
+  --input-bg: #ffffff;
+  --input-border: #d1d5db; /* gray-300 */
+
+  /* 弹窗 */
+  --modal-bg: rgba(0, 0, 0, 0.5);
+
+  /* 表格 */
+  --table-bg: #ffffff;
+  --table-hover: #f9fafb; /* gray-50 */
 }

@@ -46,6 +46,7 @@ jest.mock('../src/services/scheduler/unifiedOpenAIScheduler', () => ({
 jest.mock('../src/utils/upstreamErrorHelper', () => ({
   markTempUnavailable: jest.fn(),
   parseRetryAfter: jest.fn(() => null),
+  buildSafeUpstreamErrorForClient: jest.fn((_status, error) => error),
   sanitizeErrorForClient: jest.fn((error) => error),
   isTempUnavailable: jest.fn()
 }))

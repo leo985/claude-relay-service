@@ -1024,16 +1024,6 @@ update_model_pricing() {
     # 运行更新脚本
     if npm run update:pricing; then
         print_success "模型价格数据更新完成"
-        
-        # 显示更新后的信息
-        if [ -f "data/model_pricing.json" ]; then
-            local model_count=$(grep -o '"[^"]*"\s*:' data/model_pricing.json | wc -l)
-            local file_size=$(du -h data/model_pricing.json | cut -f1)
-            echo -e "\n更新信息:"
-            echo -e "  模型数量: ${GREEN}$model_count${NC}"
-            echo -e "  文件大小: ${GREEN}$file_size${NC}"
-            echo -e "  文件位置: $APP_DIR/data/model_pricing.json"
-        fi
     else
         print_error "模型价格数据更新失败"
         return 1

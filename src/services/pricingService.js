@@ -11,6 +11,8 @@ class PricingService {
     this.pricingFile = path.join(this.dataDir, 'model_pricing.json')
     this.pricingUrl = pricingSource.pricingUrl
     this.hashUrl = pricingSource.hashUrl
+    this.DB_KEY = 'system:model_pricing:data'
+    this.DB_META_KEY = 'system:model_pricing:meta'
     this.fallbackFile = path.join(
       process.cwd(),
       'resources',
@@ -20,6 +22,7 @@ class PricingService {
     this.localHashFile = path.join(this.dataDir, 'model_pricing.sha256')
     this.pricingData = null
     this.lastUpdated = null
+    this.pricingMeta = null
     this.updateInterval = 24 * 60 * 60 * 1000 // 24小时
     this.hashCheckInterval = 10 * 60 * 1000 // 10分钟哈希校验
     this.fileWatcher = null // 文件监听器
@@ -81,7 +84,7 @@ class PricingService {
   // 检查并更新价格数据
   async checkAndUpdatePricing() {
     try {
-      const needsUpdate = this.needsUpdate()
+      const needsUpdate = await this.needsUpdate()
 
       if (needsUpdate) {
         logger.info('🔄 Updating model pricing data...')
@@ -97,19 +100,122 @@ class PricingService {
     }
   }
 
+  getRedisClient() {
+    const redis = require('../models/redis')
+    if (!redis?.client) {
+      throw new Error('Redis client is not initialized')
+    }
+    return redis.client
+  }
+
+  parsePricingMeta(metaStr) {
+    if (!metaStr) {
+      return null
+    }
+    try {
+      return JSON.parse(metaStr)
+    } catch (error) {
+      logger.warn(`⚠️  Failed to parse pricing metadata from database: ${error.message}`)
+      return null
+    }
+  }
+
+  async readPricingMetaFromDatabase() {
+    try {
+      const client = this.getRedisClient()
+      return this.parsePricingMeta(await client.get(this.DB_META_KEY))
+    } catch (error) {
+      logger.warn(`⚠️  Failed to read pricing metadata from database: ${error.message}`)
+      return null
+    }
+  }
+
+  async hasPricingDataInDatabase() {
+    try {
+      const client = this.getRedisClient()
+      return (await client.exists(this.DB_KEY)) === 1
+    } catch (error) {
+      logger.warn(`⚠️  Failed to check pricing data in database: ${error.message}`)
+      return false
+    }
+  }
+
+  async readPricingDataFromDatabase() {
+    const client = this.getRedisClient()
+    const [dataStr, metaStr] = await Promise.all([
+      client.get(this.DB_KEY),
+      client.get(this.DB_META_KEY)
+    ])
+
+    if (!dataStr) {
+      return null
+    }
+
+    const data = JSON.parse(dataStr)
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error('Invalid pricing data structure in database')
+    }
+
+    return {
+      data,
+      meta: this.parsePricingMeta(metaStr) || {}
+    }
+  }
+
+  async savePricingDataToDatabase(data, options = {}) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error('Pricing data must be an object keyed by model name')
+    }
+
+    const client = this.getRedisClient()
+    const updatedAt = options.updatedAt || new Date().toISOString()
+    const hash = options.hash || this.persistLocalHash(JSON.stringify(data))
+    const meta = {
+      updatedAt,
+      updatedBy: options.updatedBy || 'system',
+      source: options.source || 'database',
+      hash,
+      modelCount: Object.keys(data).length
+    }
+
+    await client
+      .pipeline()
+      .set(this.DB_KEY, JSON.stringify(data))
+      .set(this.DB_META_KEY, JSON.stringify(meta))
+      .exec()
+
+    this.pricingData = data
+    this.lastUpdated = new Date(updatedAt)
+    this.pricingMeta = meta
+
+    return meta
+  }
+
   // 检查是否需要更新
-  needsUpdate() {
-    if (!fs.existsSync(this.pricingFile)) {
-      logger.info('📋 Pricing file not found, will download')
+  async needsUpdate() {
+    const meta = await this.readPricingMetaFromDatabase()
+    const hasData = await this.hasPricingDataInDatabase()
+
+    if (!hasData) {
+      logger.info('📋 Pricing data not found in database, will download')
       return true
     }
 
-    const stats = fs.statSync(this.pricingFile)
-    const fileAge = Date.now() - stats.mtime.getTime()
+    if (meta?.source === 'manual') {
+      return false
+    }
+
+    const updatedAt = meta?.updatedAt ? new Date(meta.updatedAt) : null
+    if (!updatedAt || Number.isNaN(updatedAt.getTime())) {
+      logger.info('📋 Pricing database metadata is missing updatedAt, will update')
+      return true
+    }
+
+    const fileAge = Date.now() - updatedAt.getTime()
 
     if (fileAge > this.updateInterval) {
       logger.info(
-        `📋 Pricing file is ${Math.round(fileAge / (60 * 60 * 1000))} hours old, will update`
+        `📋 Pricing data is ${Math.round(fileAge / (60 * 60 * 1000))} hours old, will update`
       )
       return true
     }
@@ -149,19 +255,26 @@ class PricingService {
 
     this.hashSyncInProgress = true
     try {
+      const hasData = await this.hasPricingDataInDatabase()
+      const meta = this.pricingMeta || (await this.readPricingMetaFromDatabase())
+      if (hasData && meta?.source === 'manual') {
+        logger.debug('💰 Pricing data contains manual edits, skipping automatic remote hash sync')
+        return
+      }
+
       const remoteHash = await this.fetchRemoteHash()
 
       if (!remoteHash) {
         return
       }
 
-      const localHash = this.computeLocalHash()
-
-      if (!localHash) {
-        logger.info('📄 本地价格文件缺失，尝试下载最新版本')
+      if (!hasData) {
+        logger.info('📄 数据库价格数据缺失，尝试下载最新版本')
         await this.downloadPricingData()
         return
       }
+
+      const localHash = await this.computeLocalHash()
 
       if (remoteHash !== localHash) {
         logger.info('🔁 检测到远端价格文件更新，开始下载最新数据')
@@ -211,28 +324,25 @@ class PricingService {
     })
   }
 
-  // 计算本地文件哈希
-  computeLocalHash() {
-    if (!fs.existsSync(this.pricingFile)) {
+  // 计算数据库价格数据哈希
+  async computeLocalHash() {
+    const meta = this.pricingMeta || (await this.readPricingMetaFromDatabase())
+    if (meta?.hash) {
+      return meta.hash
+    }
+
+    const stored = await this.readPricingDataFromDatabase()
+    if (!stored?.data) {
       return null
     }
 
-    if (fs.existsSync(this.localHashFile)) {
-      const cached = fs.readFileSync(this.localHashFile, 'utf8').trim()
-      if (cached) {
-        return cached
-      }
-    }
-
-    const fileBuffer = fs.readFileSync(this.pricingFile)
-    return this.persistLocalHash(fileBuffer)
+    return this.persistLocalHash(JSON.stringify(stored.data))
   }
 
-  // 写入本地哈希文件
+  // 计算价格数据哈希
   persistLocalHash(content) {
     const buffer = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8')
     const hash = crypto.createHash('sha256').update(buffer).digest('hex')
-    fs.writeFileSync(this.localHashFile, `${hash}\n`)
     return hash
   }
 
@@ -251,24 +361,20 @@ class PricingService {
           chunks.push(bufferChunk)
         })
 
-        response.on('end', () => {
+        response.on('end', async () => {
           try {
             const buffer = Buffer.concat(chunks)
             const rawContent = buffer.toString('utf8')
             const jsonData = JSON.parse(rawContent)
+            const hash = this.persistLocalHash(buffer)
 
-            // 保存到文件并更新哈希
-            fs.writeFileSync(this.pricingFile, rawContent)
-            this.persistLocalHash(buffer)
-
-            // 更新内存中的数据
-            this.pricingData = jsonData
-            this.lastUpdated = new Date()
+            await this.savePricingDataToDatabase(jsonData, {
+              source: 'remote',
+              updatedBy: 'system',
+              hash
+            })
 
             logger.success(`Downloaded pricing data for ${Object.keys(jsonData).length} models`)
-
-            // 设置或重新设置文件监听器
-            this.setupFileWatcher()
 
             resolve()
           } catch (error) {
@@ -288,21 +394,21 @@ class PricingService {
     })
   }
 
-  // 加载本地价格数据
+  // 从数据库加载价格数据
   async loadPricingData() {
     try {
-      if (fs.existsSync(this.pricingFile)) {
-        const data = fs.readFileSync(this.pricingFile, 'utf8')
-        this.pricingData = JSON.parse(data)
-
-        const stats = fs.statSync(this.pricingFile)
-        this.lastUpdated = stats.mtime
+      const stored = await this.readPricingDataFromDatabase()
+      if (stored?.data) {
+        this.pricingData = stored.data
+        this.pricingMeta = stored.meta || {}
+        const updatedAt = this.pricingMeta.updatedAt ? new Date(this.pricingMeta.updatedAt) : null
+        this.lastUpdated = updatedAt && !Number.isNaN(updatedAt.getTime()) ? updatedAt : new Date()
 
         logger.info(
-          `💰 Loaded pricing data for ${Object.keys(this.pricingData).length} models from cache`
+          `💰 Loaded pricing data for ${Object.keys(this.pricingData).length} models from database`
         )
       } else {
-        logger.warn('💰 No pricing data file found, will use fallback')
+        logger.warn('💰 No pricing data found in database, will use fallback')
         await this.useFallbackPricing()
       }
     } catch (error) {
@@ -315,24 +421,16 @@ class PricingService {
   async useFallbackPricing() {
     try {
       if (fs.existsSync(this.fallbackFile)) {
-        logger.info('📋 Copying fallback pricing data to data directory...')
+        logger.info('📋 Loading fallback pricing data into database...')
 
         // 读取fallback文件
         const fallbackData = fs.readFileSync(this.fallbackFile, 'utf8')
         const jsonData = JSON.parse(fallbackData)
 
-        const formattedJson = JSON.stringify(jsonData, null, 2)
-
-        // 保存到data目录
-        fs.writeFileSync(this.pricingFile, formattedJson)
-        this.persistLocalHash(formattedJson)
-
-        // 更新内存中的数据
-        this.pricingData = jsonData
-        this.lastUpdated = new Date()
-
-        // 设置或重新设置文件监听器
-        this.setupFileWatcher()
+        await this.savePricingDataToDatabase(jsonData, {
+          source: 'fallback',
+          updatedBy: 'system'
+        })
 
         logger.warn(`⚠️  Using fallback pricing data for ${Object.keys(jsonData).length} models`)
         logger.info(
@@ -737,10 +835,113 @@ class PricingService {
       initialized: this.pricingData !== null,
       lastUpdated: this.lastUpdated,
       modelCount: this.pricingData ? Object.keys(this.pricingData).length : 0,
-      nextUpdate: this.lastUpdated
-        ? new Date(this.lastUpdated.getTime() + this.updateInterval)
-        : null
+      source: this.pricingMeta?.source || null,
+      updatedBy: this.pricingMeta?.updatedBy || null,
+      hash: this.pricingMeta?.hash || null,
+      nextUpdate:
+        this.pricingMeta?.source === 'manual'
+          ? null
+          : this.lastUpdated
+            ? new Date(this.lastUpdated.getTime() + this.updateInterval)
+            : null
     }
+  }
+
+  async ensurePricingDataLoaded() {
+    if (!this.pricingData || Object.keys(this.pricingData).length === 0) {
+      await this.loadPricingData()
+    }
+    return this.pricingData || {}
+  }
+
+  normalizeModelPricing(pricing) {
+    if (!pricing || typeof pricing !== 'object' || Array.isArray(pricing)) {
+      throw new Error('pricing must be an object')
+    }
+
+    const normalized = JSON.parse(JSON.stringify(pricing))
+    const numericFields = [
+      'input_cost_per_token',
+      'output_cost_per_token',
+      'cache_creation_input_token_cost',
+      'cache_creation_input_token_cost_above_1hr',
+      'cache_read_input_token_cost',
+      'input_cost_per_token_priority',
+      'output_cost_per_token_priority',
+      'cache_read_input_token_cost_priority',
+      'input_cost_per_token_above_200k_tokens',
+      'output_cost_per_token_above_200k_tokens',
+      'cache_creation_input_token_cost_above_200k_tokens',
+      'cache_creation_input_token_cost_above_1hr_above_200k_tokens',
+      'cache_read_input_token_cost_above_200k_tokens',
+      'input_cost_per_image_token',
+      'output_cost_per_image_token',
+      'cache_read_input_image_token_cost',
+      'max_tokens',
+      'max_output_tokens',
+      'max_input_tokens',
+      'max_images_per_prompt',
+      'max_videos_per_prompt'
+    ]
+
+    for (const field of numericFields) {
+      if (
+        normalized[field] === undefined ||
+        normalized[field] === null ||
+        normalized[field] === ''
+      ) {
+        delete normalized[field]
+        continue
+      }
+      const value = Number(normalized[field])
+      if (!Number.isFinite(value) || value < 0) {
+        throw new Error(`${field} must be a non-negative number`)
+      }
+      normalized[field] = value
+    }
+
+    return normalized
+  }
+
+  async upsertModelPricing(modelName, pricing, updatedBy = 'admin') {
+    const model = typeof modelName === 'string' ? modelName.trim() : ''
+    if (!model) {
+      throw new Error('model is required')
+    }
+
+    const data = { ...(await this.ensurePricingDataLoaded()) }
+    const existing = data[model] && typeof data[model] === 'object' ? data[model] : {}
+    data[model] = {
+      ...existing,
+      ...this.normalizeModelPricing(pricing)
+    }
+
+    await this.savePricingDataToDatabase(data, {
+      source: 'manual',
+      updatedBy
+    })
+
+    return data[model]
+  }
+
+  async deleteModelPricing(modelName, updatedBy = 'admin') {
+    const model = typeof modelName === 'string' ? modelName.trim() : ''
+    if (!model) {
+      throw new Error('model is required')
+    }
+
+    const data = { ...(await this.ensurePricingDataLoaded()) }
+    if (!Object.prototype.hasOwnProperty.call(data, model)) {
+      return false
+    }
+
+    delete data[model]
+    await this.savePricingDataToDatabase(data, {
+      source: 'manual',
+      updatedBy
+    })
+
+    return true
   }
 
   // 强制更新价格数据
@@ -761,49 +962,7 @@ class PricingService {
 
   // 设置文件监听器
   setupFileWatcher() {
-    try {
-      // 如果已有监听器，先关闭
-      if (this.fileWatcher) {
-        this.fileWatcher.close()
-        this.fileWatcher = null
-      }
-
-      // 只有文件存在时才设置监听器
-      if (!fs.existsSync(this.pricingFile)) {
-        logger.debug('💰 Pricing file does not exist yet, skipping file watcher setup')
-        return
-      }
-
-      // 使用 fs.watchFile 作为更可靠的文件监听方式
-      // 它使用轮询，虽然性能稍差，但更可靠
-      const watchOptions = {
-        persistent: true,
-        interval: 60000 // 每60秒检查一次
-      }
-
-      // 记录初始的修改时间
-      let lastMtime = fs.statSync(this.pricingFile).mtimeMs
-
-      fs.watchFile(this.pricingFile, watchOptions, (curr, _prev) => {
-        // 检查文件是否真的被修改了（不仅仅是访问）
-        if (curr.mtimeMs !== lastMtime) {
-          lastMtime = curr.mtimeMs
-          logger.debug(
-            `💰 Detected change in pricing file (mtime: ${new Date(curr.mtime).toISOString()})`
-          )
-          this.handleFileChange()
-        }
-      })
-
-      // 保存引用以便清理
-      this.fileWatcher = {
-        close: () => fs.unwatchFile(this.pricingFile)
-      }
-
-      logger.info('👁️  File watcher set up for model_pricing.json (polling every 60s)')
-    } catch (error) {
-      logger.error('❌ Failed to setup file watcher:', error)
-    }
+    logger.debug('💰 Pricing data is database-backed; file watcher is not required')
   }
 
   // 处理文件变化（带防抖）
@@ -815,7 +974,7 @@ class PricingService {
 
     // 设置新的定时器（防抖500ms）
     this.reloadDebounceTimer = setTimeout(async () => {
-      logger.info('🔄 Reloading pricing data due to file change...')
+      logger.info('🔄 Reloading pricing data from database...')
       await this.reloadPricingData()
     }, 500)
   }
@@ -823,32 +982,10 @@ class PricingService {
   // 重新加载价格数据
   async reloadPricingData() {
     try {
-      // 验证文件是否存在
-      if (!fs.existsSync(this.pricingFile)) {
-        logger.warn('💰 Pricing file was deleted, using fallback')
-        await this.useFallbackPricing()
-        // 重新设置文件监听器（fallback会创建新文件）
-        this.setupFileWatcher()
-        return
-      }
-
-      // 读取文件内容
-      const data = fs.readFileSync(this.pricingFile, 'utf8')
-
-      // 尝试解析JSON
-      const jsonData = JSON.parse(data)
-
-      // 验证数据结构
-      if (typeof jsonData !== 'object' || Object.keys(jsonData).length === 0) {
-        throw new Error('Invalid pricing data structure')
-      }
-
-      // 更新内存中的数据
-      this.pricingData = jsonData
-      this.lastUpdated = new Date()
-
+      await this.loadPricingData()
+      const jsonData = this.pricingData || {}
       const modelCount = Object.keys(jsonData).length
-      logger.success(`Reloaded pricing data for ${modelCount} models from file`)
+      logger.success(`Reloaded pricing data for ${modelCount} models from database`)
 
       // 显示一些统计信息
       const claudeModels = Object.keys(jsonData).filter((k) => k.includes('claude')).length

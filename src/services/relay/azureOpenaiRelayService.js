@@ -266,6 +266,27 @@ const streamManager = new StreamManager()
 const MAX_BUFFER_SIZE = 64 * 1024 // 64KB
 const MAX_EVENT_SIZE = 16 * 1024 // 16KB 单个事件最大大小
 
+async function readStreamErrorData(stream) {
+  if (!stream || typeof stream.on !== 'function') {
+    return stream
+  }
+
+  const chunks = []
+  await new Promise((resolve) => {
+    stream.on('data', (chunk) => chunks.push(chunk))
+    stream.on('end', resolve)
+    stream.on('error', resolve)
+    setTimeout(resolve, 5000)
+  })
+
+  const raw = Buffer.concat(chunks).toString()
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return { error: { message: raw || 'Unknown upstream error' } }
+  }
+}
+
 // 处理流式响应
 function handleStreamResponse(upstreamResponse, clientResponse, options = {}) {
   const { onData, onEnd, onError } = options
@@ -294,6 +315,8 @@ function handleStreamResponse(upstreamResponse, clientResponse, options = {}) {
     const FINAL_CHUNKS_SIZE = 32 * 1024 // 32KB保留最终chunks
     const allParsedEvents = [] // 存储所有解析的事件用于最终usage提取
 
+    clientResponse.status(upstreamResponse.status)
+
     // 设置响应头
     clientResponse.setHeader('Content-Type', 'text/event-stream')
     clientResponse.setHeader('Cache-Control', 'no-cache')
@@ -312,6 +335,26 @@ function handleStreamResponse(upstreamResponse, clientResponse, options = {}) {
         clientResponse.setHeader(header, value)
       }
     })
+
+    if (upstreamResponse.status >= 400) {
+      const sendSanitizedError = async () => {
+        const errorData = await readStreamErrorData(upstreamResponse.data)
+        const safePayload = upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+          upstreamResponse.status,
+          errorData
+        )
+        if (!clientResponse.destroyed) {
+          clientResponse.write(`data: ${JSON.stringify(safePayload)}\n\n`)
+          clientResponse.end()
+        }
+        resolve({ usageData: null, actualModel: null })
+      }
+      sendSanitizedError().catch((error) => {
+        logger.error('Azure OpenAI stream error sanitization failed:', error)
+        reject(error)
+      })
+      return
+    }
 
     // 立即刷新响应头
     if (typeof clientResponse.flushHeaders === 'function') {
@@ -753,11 +796,20 @@ function handleNonStreamResponse(upstreamResponse, clientResponse) {
     })
 
     // 返回响应数据
-    const responseData = upstreamResponse.data
+    const responseData =
+      upstreamResponse.status >= 400
+        ? upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+            upstreamResponse.status,
+            upstreamResponse.data
+          )
+        : upstreamResponse.data
     clientResponse.json(responseData)
 
     // 使用强化的用量提取
-    const { usageData, actualModel } = extractUsageDataRobust(responseData, 'non-stream')
+    const { usageData, actualModel } =
+      upstreamResponse.status >= 400
+        ? { usageData: null, actualModel: null }
+        : extractUsageDataRobust(responseData, 'non-stream')
 
     return { usageData, actualModel, responseData }
   } catch (error) {

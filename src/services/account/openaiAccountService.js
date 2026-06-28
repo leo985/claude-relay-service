@@ -507,6 +507,11 @@ async function createAccount(accountData) {
       accountData.supportsImageGeneration === true || accountData.supportsImageGeneration === 'true'
         ? 'true'
         : 'false',
+    // 图片输入能力开关。Codex token 账号默认支持图片输入，可显式关闭。
+    supportsImages:
+      accountData.supportsImages === false || accountData.supportsImages === 'false'
+        ? 'false'
+        : 'true',
     lastRefresh: now,
     createdAt: now,
     updatedAt: now
@@ -556,6 +561,7 @@ async function getAccount(accountId) {
   }
   // 归一化图片生成能力标记为布尔值
   accountData.supportsImageGeneration = accountData.supportsImageGeneration === 'true'
+  accountData.supportsImages = accountData.supportsImages !== 'false'
   if (accountData.openaiOauth) {
     try {
       accountData.openaiOauth = JSON.parse(decrypt(accountData.openaiOauth))
@@ -632,6 +638,12 @@ async function updateAccount(accountId, updates) {
       updates.supportsImageGeneration === true || updates.supportsImageGeneration === 'true'
         ? 'true'
         : 'false'
+  }
+
+  // 处理 supportsImages 布尔值转字符串；旧账号未设置时保持默认支持。
+  if (updates.supportsImages !== undefined) {
+    updates.supportsImages =
+      updates.supportsImages === false || updates.supportsImages === 'false' ? 'false' : 'true'
   }
 
   // 更新账户类型时处理共享账户集合
@@ -761,6 +773,7 @@ async function getAllAccounts() {
         isActive: accountData.isActive === 'true',
         schedulable: accountData.schedulable !== 'false',
         supportsImageGeneration: accountData.supportsImageGeneration === 'true',
+        supportsImages: accountData.supportsImages !== 'false',
         openaiOauth: maskedOauth,
         accessToken: maskedAccessToken,
         refreshToken: maskedRefreshToken,
@@ -829,6 +842,8 @@ async function getAccountOverview(accountId) {
     platform: accountData.platform || 'openai',
     isActive: accountData.isActive === 'true',
     schedulable: accountData.schedulable !== 'false',
+    supportsImages: accountData.supportsImages !== 'false',
+    supportsImageGeneration: accountData.supportsImageGeneration === 'true',
     rateLimitStatus: rateLimitInfo || {
       status: 'normal',
       isRateLimited: false,

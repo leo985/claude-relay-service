@@ -1,6 +1,5 @@
 const https = require('https')
 const zlib = require('zlib')
-const path = require('path')
 const ProxyHelper = require('../../utils/proxyHelper')
 const { filterForClaude } = require('../../utils/headerFilter')
 const claudeAccountService = require('../account/claudeAccountService')
@@ -20,9 +19,9 @@ const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const metadataUserIdHelper = require('../../utils/metadataUserIdHelper')
 const {
   getHttpsAgentForStream,
-  getHttpsAgentForNonStream,
-  getPricingData
+  getHttpsAgentForNonStream
 } = require('../../utils/performanceOptimizer')
+const pricingService = require('../pricingService')
 
 // structuredClone polyfill for Node < 17
 const safeClone =
@@ -41,6 +40,44 @@ class ClaudeRelayService {
     this.toolNameSuffix = null
     this.toolNameSuffixGeneratedAt = 0
     this.toolNameSuffixTtlMs = 60 * 60 * 1000
+  }
+
+  _parseErrorBody(body) {
+    if (!body) {
+      return body
+    }
+    if (Buffer.isBuffer(body)) {
+      return this._parseErrorBody(body.toString('utf8'))
+    }
+    if (typeof body !== 'string') {
+      return body
+    }
+    try {
+      return JSON.parse(body)
+    } catch {
+      return { error: { message: body } }
+    }
+  }
+
+  _sanitizeClaudeErrorResponseForClient(response) {
+    if (!response || response.statusCode < 400) {
+      return response
+    }
+
+    const safeBody = upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+      response.statusCode,
+      this._parseErrorBody(response.body),
+      { format: 'anthropic' }
+    )
+
+    return {
+      ...response,
+      headers: {
+        ...(response.headers || {}),
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify(safeBody)
+    }
   }
 
   // 🔧 根据模型ID和客户端传递的 anthropic-beta 获取最终的 header
@@ -1020,8 +1057,9 @@ class ClaudeRelayService {
       }
 
       // 在响应中添加accountId，以便调用方记录账户级别统计
-      response.accountId = accountId
-      return response
+      const sanitizedResponse = this._sanitizeClaudeErrorResponseForClient(response)
+      sanitizedResponse.accountId = accountId
+      return sanitizedResponse
     } catch (error) {
       logger.error(
         `❌ Claude relay request failed for key: ${apiKeyData.name || apiKeyData.id}:`,
@@ -1326,24 +1364,15 @@ class ClaudeRelayService {
     }
 
     try {
-      // 使用缓存的定价数据
-      const pricingFilePath = path.join(__dirname, '../../data/model_pricing.json')
-      const pricingData = getPricingData(pricingFilePath)
-
-      if (!pricingData) {
-        logger.warn('⚠️ Model pricing file not found, skipping max_tokens validation')
-        return
-      }
-
       const model = body.model || 'claude-sonnet-4-20250514'
 
-      // 查找对应模型的配置
-      const modelConfig = pricingData[model]
+      // 查找对应模型的配置（价格数据由数据库加载到 pricingService 内存缓存）
+      const modelConfig = pricingService.getModelPricing(model)
 
       if (!modelConfig) {
         // 如果找不到模型配置，直接透传客户端参数，不进行任何干预
         logger.info(
-          `📝 Model ${model} not found in pricing file, passing through client parameters without modification`
+          `📝 Model ${model} not found in pricing database, passing through client parameters without modification`
         )
         return
       }
@@ -1364,8 +1393,8 @@ class ClaudeRelayService {
         body.max_tokens = maxLimit
       }
     } catch (error) {
-      logger.error('❌ Failed to validate max_tokens from pricing file:', error)
-      // 如果文件读取失败，不进行校验，让请求继续处理
+      logger.error('❌ Failed to validate max_tokens from pricing database:', error)
+      // 如果价格数据读取失败，不进行校验，让请求继续处理
     }
   }
 
@@ -2164,28 +2193,22 @@ class ClaudeRelayService {
                 errorBody429
               )
               if (isStreamWritable(responseStream)) {
-                let errorMessage = `Claude API error: 429`
-                try {
-                  const parsedError = JSON.parse(errorBody429)
-                  if (parsedError.error?.message) {
-                    errorMessage = parsedError.error.message
-                  } else if (parsedError.message) {
-                    errorMessage = parsedError.message
-                  }
-                } catch {
-                  // 使用默认错误消息
-                }
+                const safeErrorPayload = upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+                  429,
+                  this._parseErrorBody(errorBody429),
+                  { format: 'anthropic' }
+                )
+                const safeMessage = safeErrorPayload.error?.message || 'Claude API error: 429'
                 if (toolNameStreamTransformer) {
                   responseStream.write(
-                    `data: ${JSON.stringify({ type: 'error', error: errorMessage })}\n\n`
+                    `data: ${JSON.stringify({ type: 'error', error: safeMessage })}\n\n`
                   )
                 } else {
                   responseStream.write('event: error\n')
                   responseStream.write(
                     `data: ${JSON.stringify({
-                      error: 'Claude API error',
+                      ...safeErrorPayload,
                       status: 429,
-                      details: errorBody429,
                       timestamp: new Date().toISOString()
                     })}\n\n`
                   )
@@ -2288,28 +2311,22 @@ class ClaudeRelayService {
               errorBody429
             )
             if (isStreamWritable(responseStream)) {
-              let errorMessage = `Claude API error: 429`
-              try {
-                const parsedError = JSON.parse(errorBody429)
-                if (parsedError.error?.message) {
-                  errorMessage = parsedError.error.message
-                } else if (parsedError.message) {
-                  errorMessage = parsedError.message
-                }
-              } catch {
-                // 使用默认错误消息
-              }
+              const safeErrorPayload = upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+                429,
+                this._parseErrorBody(errorBody429),
+                { format: 'anthropic' }
+              )
+              const safeMessage = safeErrorPayload.error?.message || 'Claude API error: 429'
               if (toolNameStreamTransformer) {
                 responseStream.write(
-                  `data: ${JSON.stringify({ type: 'error', error: errorMessage })}\n\n`
+                  `data: ${JSON.stringify({ type: 'error', error: safeMessage })}\n\n`
                 )
               } else {
                 responseStream.write('event: error\n')
                 responseStream.write(
                   `data: ${JSON.stringify({
-                    error: 'Claude API error',
+                    ...safeErrorPayload,
                     status: 429,
-                    details: errorBody429,
                     timestamp: new Date().toISOString()
                   })}\n\n`
                 )
@@ -2538,32 +2555,26 @@ class ClaudeRelayService {
               })()
             }
             if (isStreamWritable(responseStream)) {
-              // 解析 Claude API 返回的错误详情
-              let errorMessage = `Claude API error: ${res.statusCode}`
-              try {
-                const parsedError = JSON.parse(errorData)
-                if (parsedError.error?.message) {
-                  errorMessage = parsedError.error.message
-                } else if (parsedError.message) {
-                  errorMessage = parsedError.message
-                }
-              } catch {
-                // 使用默认错误消息
-              }
+              const safeErrorPayload = upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+                res.statusCode,
+                this._parseErrorBody(errorData),
+                { format: 'anthropic' }
+              )
+              const safeMessage =
+                safeErrorPayload.error?.message || `Claude API error: ${res.statusCode}`
 
               // 如果有 streamTransformer（如测试请求），使用前端期望的格式
               if (toolNameStreamTransformer) {
                 responseStream.write(
-                  `data: ${JSON.stringify({ type: 'error', error: errorMessage })}\n\n`
+                  `data: ${JSON.stringify({ type: 'error', error: safeMessage })}\n\n`
                 )
               } else {
                 // 标准错误格式
                 responseStream.write('event: error\n')
                 responseStream.write(
                   `data: ${JSON.stringify({
-                    error: 'Claude API error',
+                    ...safeErrorPayload,
                     status: res.statusCode,
-                    details: errorData,
                     timestamp: new Date().toISOString()
                   })}\n\n`
                 )

@@ -778,25 +778,31 @@ class BedrockRelayService {
       }
     }
 
-    const errorMessage = error.message || 'Unknown Bedrock error'
+    const statusCode = this._getErrorStatusCode(error)
+    const createHandledError = (message) => {
+      const handledError = new Error(message)
+      handledError.statusCode = statusCode
+      handledError.code = error.name || 'BEDROCK_UPSTREAM_ERROR'
+      return handledError
+    }
 
     if (error.name === 'ValidationException') {
-      return new Error(`Bedrock参数验证失败: ${errorMessage}`)
+      return createHandledError('Bedrock参数验证失败，请检查请求后重试')
     }
 
     if (error.name === 'ThrottlingException') {
-      return new Error('Bedrock请求限流，请稍后重试')
+      return createHandledError('Bedrock请求限流，请稍后重试')
     }
 
     if (error.name === 'AccessDeniedException') {
-      return new Error('Bedrock访问被拒绝，请检查IAM权限')
+      return createHandledError('Bedrock访问被拒绝')
     }
 
     if (error.name === 'ModelNotReadyException') {
-      return new Error('Bedrock模型未就绪，请稍后重试')
+      return createHandledError('Bedrock模型未就绪，请稍后重试')
     }
 
-    return new Error(`Bedrock服务错误: ${errorMessage}`)
+    return createHandledError('Bedrock服务错误，请稍后重试')
   }
 
   // 获取可用模型列表

@@ -234,7 +234,9 @@ class OpenAITokenImageRelayService {
     if (res.headersSent) {
       return res.end()
     }
-    return res.status(response.status).json(upstreamErrorHelper.sanitizeErrorForClient(errorData))
+    return res
+      .status(response.status)
+      .json(upstreamErrorHelper.sanitizeErrorForClient(errorData, { statusCode: response.status }))
   }
 
   async _recordUsage({ req, account, apiKeyData, usageData, actualModel, statusCode }) {
@@ -421,13 +423,22 @@ class OpenAITokenImageRelayService {
         return res.end()
       }
 
-      return res.status(error.statusCode || error.response?.status || 500).json({
-        error: {
-          message: error.message || 'Internal server error',
-          type: error.code || 'api_error',
-          code: error.code || 'internal_error'
-        }
-      })
+      if (error.statusCode && !error.response) {
+        return res.status(error.statusCode).json({
+          error: {
+            message: error.message || 'Invalid request',
+            type: error.code || 'invalid_request_error',
+            code: error.code || 'invalid_request'
+          }
+        })
+      }
+
+      const status = error.statusCode || error.response?.status || 500
+      return res
+        .status(status)
+        .json(
+          upstreamErrorHelper.buildSafeUpstreamErrorForClient(status, error.response?.data || error)
+        )
     } finally {
       if (handleClientDisconnect) {
         req.removeListener('aborted', handleClientDisconnect)

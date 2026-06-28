@@ -17,9 +17,11 @@ This local copy serves as a fallback when the remote file cannot be downloaded d
 
 ## Update Process
 The pricingService will:
-1. First attempt to download the latest version from GitHub
-2. If download fails, use this local copy as fallback
-3. Log a warning when using the fallback file
+1. Load pricing data from Redis (`system:model_pricing:data`)
+2. If Redis has no pricing data, download the latest version from the configured price mirror
+3. Store downloaded pricing data back into Redis
+4. If download fails, use this local copy as a seed and store it into Redis
+5. Log a warning when using the fallback file
 
 ## Manual Update
 To manually update this file with the latest pricing data (if automation is unavailable):

@@ -182,7 +182,9 @@ async function routeToBackend(req, res, requestedModel) {
               try {
                 const eventData = JSON.parse(jsonStr)
                 if (eventData.error) {
-                  originalWrite(`data: ${jsonStr}\n\n`)
+                  for (const c of codexConverter.convertErrorToOpenAISSE(eventData)) {
+                    originalWrite(c)
+                  }
                   continue
                 }
                 const converted = codexConverter.convertStreamChunk(
@@ -232,7 +234,9 @@ async function routeToBackend(req, res, requestedModel) {
                 try {
                   const eventData = JSON.parse(jsonStr)
                   if (eventData.error) {
-                    originalWrite(`data: ${jsonStr}\n\n`)
+                    for (const c of codexConverter.convertErrorToOpenAISSE(eventData)) {
+                      originalWrite(c)
+                    }
                   } else {
                     const converted = codexConverter.convertStreamChunk(
                       eventData,

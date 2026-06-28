@@ -4,6 +4,7 @@ const path = require('path')
 const axios = require('axios')
 const claudeCodeHeadersService = require('../../services/claudeCodeHeadersService')
 const claudeAccountService = require('../../services/account/claudeAccountService')
+const modelService = require('../../services/modelService')
 const redis = require('../../models/redis')
 const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
@@ -459,9 +460,54 @@ router.get('/models/pricing', authenticateAdmin, async (req, res) => {
   }
 })
 
+// 新增/更新单个模型价格
+router.put('/models/pricing/model', authenticateAdmin, async (req, res) => {
+  try {
+    const { model, pricing } = req.body || {}
+    const updatedBy = req.session?.username || req.admin?.username || 'admin'
+    const data = await pricingService.upsertModelPricing(model, pricing, updatedBy)
+
+    res.json({
+      success: true,
+      message: 'Model pricing saved successfully',
+      data,
+      status: pricingService.getStatus()
+    })
+  } catch (error) {
+    logger.error('Failed to save model pricing:', error)
+    res
+      .status(400)
+      .json({ success: false, error: 'Failed to save model pricing', message: error.message })
+  }
+})
+
+// 删除单个模型价格
+router.delete('/models/pricing/model', authenticateAdmin, async (req, res) => {
+  try {
+    const model = req.body?.model || req.query?.model
+    const updatedBy = req.session?.username || req.admin?.username || 'admin'
+    const deleted = await pricingService.deleteModelPricing(model, updatedBy)
+
+    res.json({
+      success: true,
+      message: deleted ? 'Model pricing deleted successfully' : 'Model pricing not found',
+      deleted,
+      status: pricingService.getStatus()
+    })
+  } catch (error) {
+    logger.error('Failed to delete model pricing:', error)
+    res
+      .status(400)
+      .json({ success: false, error: 'Failed to delete model pricing', message: error.message })
+  }
+})
+
 // 获取价格服务状态
 router.get('/models/pricing/status', authenticateAdmin, async (req, res) => {
   try {
+    if (!pricingService.pricingData || Object.keys(pricingService.pricingData).length === 0) {
+      await pricingService.loadPricingData()
+    }
     const status = pricingService.getStatus()
     res.json({ success: true, data: status })
   } catch (error) {
@@ -478,6 +524,89 @@ router.post('/models/pricing/refresh', authenticateAdmin, async (req, res) => {
   } catch (error) {
     logger.error('Failed to refresh pricing:', error)
     res.status(500).json({ error: 'Failed to refresh pricing', message: error.message })
+  }
+})
+
+// ==================== 模型列表配置 ====================
+
+// 获取模型列表配置（页面配置 + 默认列表）
+router.get('/models/config', authenticateAdmin, async (req, res) => {
+  try {
+    const customModels = await modelService.getCustomModels()
+    const defaultModels = modelService.getDefaultAllModels()
+
+    // 读取 updatedAt / updatedBy
+    let updatedAt = null
+    let updatedBy = null
+    if (customModels) {
+      const configStr = await redis.client.get('system:models_config')
+      if (configStr) {
+        try {
+          const parsed = JSON.parse(configStr)
+          updatedAt = parsed.updatedAt || null
+          updatedBy = parsed.updatedBy || null
+        } catch (_e) {
+          // ignore
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        customModels: customModels || [],
+        defaultModels: defaultModels.map((m) => ({ id: m.id, provider: m.owned_by })),
+        isCustomEnabled: customModels !== null && customModels.length > 0,
+        updatedAt,
+        updatedBy
+      }
+    })
+  } catch (error) {
+    logger.error('❌ Failed to get models config:', error)
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to get models config', message: error.message })
+  }
+})
+
+// 保存模型列表配置
+router.put('/models/config', authenticateAdmin, async (req, res) => {
+  try {
+    const { models } = req.body
+    if (!Array.isArray(models)) {
+      return res.status(400).json({ success: false, error: 'models must be an array' })
+    }
+
+    const updatedBy = req.session?.username || 'admin'
+    await modelService.saveCustomModels(models, updatedBy)
+
+    res.json({
+      success: true,
+      message: '模型列表配置已保存',
+      data: {
+        models: modelService.cachedConfig,
+        updatedAt: new Date().toISOString(),
+        updatedBy
+      }
+    })
+  } catch (error) {
+    logger.error('❌ Failed to save models config:', error)
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to save models config', message: error.message })
+  }
+})
+
+// 恢复默认模型列表
+router.delete('/models/config', authenticateAdmin, async (req, res) => {
+  try {
+    await modelService.clearCustomModels()
+    res.json({ success: true, message: '已恢复默认模型列表' })
+  } catch (error) {
+    logger.error('❌ Failed to reset models config:', error)
+    res
+      .status(500)
+      .json({ success: false, error: 'Failed to reset models config', message: error.message })
   }
 })
 

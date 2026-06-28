@@ -79,7 +79,7 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
 
     // 通用账户统计函数 - 单次遍历完成所有统计
     const countAccountStats = (accounts, opts = {}) => {
-      const { isStringType = false, checkGeminiRateLimit = false } = opts
+      const { isStringType = false } = opts
       let normal = 0,
         abnormal = 0,
         paused = 0,
@@ -92,20 +92,21 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
             (!acc.isActive && acc.isActive !== 'false' && acc.isActive !== false)
           : acc.isActive
         const isBlocked = acc.status === 'blocked' || acc.status === 'unauthorized'
+        const normalizedStatus = typeof acc.status === 'string' ? acc.status.toLowerCase() : ''
         const isSchedulable = isStringType
           ? acc.schedulable !== 'false' && acc.schedulable !== false
           : acc.schedulable !== false
-        const isRateLimited = checkGeminiRateLimit
-          ? acc.rateLimitStatus === 'limited' ||
-            (acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited)
-          : acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited
+        const isRateLimited =
+          isRateLimitedFlag(acc.rateLimitStatus) ||
+          normalizedStatus === 'ratelimited' ||
+          normalizedStatus === 'rate_limited'
 
-        if (!isActive || isBlocked) {
+        if (isRateLimited) {
+          rateLimited++
+        } else if (!isActive || isBlocked) {
           abnormal++
         } else if (!isSchedulable) {
           paused++
-        } else if (isRateLimited) {
-          rateLimited++
         } else {
           normal++
         }
@@ -180,7 +181,7 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
     // 各平台账户统计（单次遍历）
     const claudeStats = countAccountStats(claudeAccounts)
     const claudeConsoleStats = countAccountStats(claudeConsoleAccounts)
-    const geminiStats = countAccountStats(geminiAccounts, { checkGeminiRateLimit: true })
+    const geminiStats = countAccountStats(geminiAccounts)
     const bedrockStats = countAccountStats(bedrockAccounts)
     const openaiStats = countAccountStats(openaiAccounts, { isStringType: true })
     const ccrStats = countAccountStats(ccrAccounts)

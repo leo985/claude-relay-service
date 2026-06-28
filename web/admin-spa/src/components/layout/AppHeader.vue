@@ -1,8 +1,14 @@
 <template>
   <!-- 顶部导航 -->
   <div
-    class="glass-strong mb-4 rounded-xl p-3 shadow-xl sm:mb-6 sm:rounded-2xl sm:p-4 md:mb-8 md:rounded-3xl md:p-6"
-    style="z-index: 10; position: relative"
+    class="mb-4 rounded-xl p-3 sm:mb-6 sm:rounded-2xl sm:p-4 md:mb-8 md:rounded-2xl md:p-6"
+    style="
+      z-index: 10;
+      position: relative;
+      background: var(--surface-color);
+      border: 1px solid var(--border-color);
+      box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+    "
   >
     <div class="flex flex-col items-center justify-between gap-3 sm:flex-row sm:gap-4">
       <div
@@ -13,12 +19,12 @@
           :logo-src="oemSettings.siteIconData || oemSettings.siteIcon"
           subtitle="管理后台"
           :title="oemSettings.siteName"
-          title-class="text-white dark:text-gray-100"
+          title-class="text-gray-900 dark:text-gray-100"
         >
           <template #after-title>
             <!-- 版本信息 -->
             <div class="flex items-center gap-1 sm:gap-2">
-              <span class="font-mono text-xs text-gray-400 dark:text-gray-500 sm:text-sm"
+              <span class="font-mono text-xs text-gray-500 dark:text-gray-400 sm:text-sm"
                 >v{{ versionInfo.current || '...' }}</span
               >
               <!-- 更新提示 -->
@@ -51,7 +57,7 @@
         <!-- 用户菜单 -->
         <div class="user-menu-container relative">
           <button
-            class="user-menu-button flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-semibold text-white shadow-lg transition-all duration-200 hover:scale-105 hover:shadow-xl active:scale-95 sm:px-4 sm:py-2.5"
+            class="user-menu-button flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-white transition-colors duration-200 sm:px-4 sm:py-2.5"
             @click="userMenuOpen = !userMenuOpen"
           >
             <i class="fas fa-user-circle text-sm sm:text-base" />
@@ -527,36 +533,18 @@ onUnmounted(() => {
 /* 用户菜单按钮样式 */
 .user-menu-button {
   position: relative;
-  overflow: hidden;
   min-height: 38px;
-  background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
-  box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.3);
+  background: var(--primary-color);
 }
 
 .user-menu-button:hover {
-  box-shadow: 0 6px 16px rgba(var(--primary-rgb), 0.4);
-}
-
-/* 添加光泽效果 */
-.user-menu-button::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
-  transition: left 0.5s;
-}
-
-.user-menu-button:hover::before {
-  left: 100%;
+  background: #4338ca;
 }
 
 /* 用户菜单样式优化 */
 .user-menu-dropdown {
   margin-top: 8px;
-  animation: slideDown 0.3s ease-out;
+  animation: slideDown 0.2s ease-out;
 }
 
 @keyframes slideDown {

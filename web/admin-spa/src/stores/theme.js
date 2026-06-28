@@ -11,26 +11,26 @@ export const ThemeMode = {
 // 中国传统色系预设
 export const ColorSchemes = {
   purple: {
-    name: '默认紫',
-    nameEn: 'Purple',
-    primary: '#667eea',
-    secondary: '#764ba2',
-    accent: '#f093fb',
-    gradientStart: '#667eea',
-    gradientMid: '#764ba2',
-    gradientEnd: '#f093fb',
-    // 玻璃态背景色（亮色模式）
-    glassStrong: 'rgba(255, 255, 255, 0.95)',
-    glass: 'rgba(255, 255, 255, 0.1)',
+    name: '智汇靛蓝',
+    nameEn: 'Smart Hub Indigo',
+    primary: '#4f46e5',
+    secondary: '#6366f1',
+    accent: '#818cf8',
+    gradientStart: '#f9fafb',
+    gradientMid: '#f9fafb',
+    gradientEnd: '#f9fafb',
+    // 扁平背景色（亮色模式）
+    glassStrong: '#ffffff',
+    glass: '#ffffff',
     // 暗黑模式
-    darkPrimary: '#818cf8',
-    darkSecondary: '#a78bfa',
-    darkAccent: '#c084fc',
-    darkGradientStart: '#1f2937',
-    darkGradientMid: '#374151',
-    darkGradientEnd: '#4b5563',
-    darkGlassStrong: 'rgba(31, 41, 55, 0.95)',
-    darkGlass: 'rgba(0, 0, 0, 0.2)'
+    darkPrimary: '#6366f1',
+    darkSecondary: '#818cf8',
+    darkAccent: '#a5b4fc',
+    darkGradientStart: '#111827',
+    darkGradientMid: '#111827',
+    darkGradientEnd: '#111827',
+    darkGlassStrong: '#1f2937',
+    darkGlass: '#1f2937'
   },
   celadon: {
     name: '青瓷',
@@ -241,51 +241,40 @@ export const useThemeStore = defineStore('theme', () => {
     root.style.setProperty('--secondary-color', secondary)
     root.style.setProperty('--accent-color', accent)
 
-    // 设置背景渐变
-    root.style.setProperty(
-      '--bg-gradient-start',
-      dark ? scheme.darkGradientStart : scheme.gradientStart
-    )
-    root.style.setProperty('--bg-gradient-mid', dark ? scheme.darkGradientMid : scheme.gradientMid)
-    root.style.setProperty('--bg-gradient-end', dark ? scheme.darkGradientEnd : scheme.gradientEnd)
+    // 背景 - 扁平纯色，不再使用渐变
+    root.style.setProperty('--bg-gradient-start', dark ? '#111827' : '#f9fafb')
+    root.style.setProperty('--bg-gradient-mid', dark ? '#111827' : '#f9fafb')
+    root.style.setProperty('--bg-gradient-end', dark ? '#111827' : '#f9fafb')
 
-    // 设置玻璃态背景色
-    root.style.setProperty(
-      '--glass-strong-color',
-      dark ? scheme.darkGlassStrong : scheme.glassStrong
-    )
-    root.style.setProperty('--glass-color', dark ? scheme.darkGlass : scheme.glass)
-
-    // 设置表面颜色（卡片背景等）
-    root.style.setProperty('--surface-color', dark ? scheme.darkGlassStrong : scheme.glassStrong)
-    root.style.setProperty('--table-bg', dark ? scheme.darkGlassStrong : scheme.glassStrong)
-    root.style.setProperty('--input-bg', dark ? scheme.darkGlassStrong : scheme.glassStrong)
+    // 表面/容器 - 实色，不再使用半透明玻璃态
+    root.style.setProperty('--glass-strong-color', dark ? '#1f2937' : '#ffffff')
+    root.style.setProperty('--glass-color', dark ? '#1f2937' : '#ffffff')
+    root.style.setProperty('--surface-color', dark ? '#1f2937' : '#ffffff')
+    root.style.setProperty('--table-bg', dark ? '#1f2937' : '#ffffff')
+    root.style.setProperty('--input-bg', dark ? '#1f2937' : '#ffffff')
 
     // 解析颜色为 RGB 值用于 rgba()
     const hexToRgb = (hex) => {
       const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex)
       return result
         ? `${parseInt(result[1], 16)}, ${parseInt(result[2], 16)}, ${parseInt(result[3], 16)}`
-        : '102, 126, 234'
+        : '79, 70, 229'
     }
 
     const primaryRgb = hexToRgb(primary)
     const secondaryRgb = hexToRgb(secondary)
     const accentRgb = hexToRgb(accent)
 
-    // 设置 RGB 变量用于 rgba()
     root.style.setProperty('--primary-rgb', primaryRgb)
     root.style.setProperty('--secondary-rgb', secondaryRgb)
     root.style.setProperty('--accent-rgb', accentRgb)
 
-    // 设置表格 hover 颜色（暗黑模式透明度更高）
-    root.style.setProperty('--table-hover', `rgba(${primaryRgb}, ${dark ? 0.1 : 0.05})`)
+    // 表格 hover
+    root.style.setProperty('--table-hover', dark ? '#374151' : '#f9fafb')
 
-    // 设置边框颜色（基于主题色）
-    root.style.setProperty('--border-color', `rgba(${primaryRgb}, ${dark ? 0.25 : 0.2})`)
-
-    // 设置输入框边框
-    root.style.setProperty('--input-border', `rgba(${primaryRgb}, ${dark ? 0.3 : 0.25})`)
+    // 边框 - 实色细边框
+    root.style.setProperty('--border-color', dark ? '#374151' : '#e5e7eb')
+    root.style.setProperty('--input-border', dark ? '#374151' : '#d1d5db')
   }
 
   // 设置主题模式

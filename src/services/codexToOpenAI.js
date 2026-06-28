@@ -3,6 +3,8 @@
  * 将 Codex/OpenAI Responses API 的 SSE 事件转为标准 chat.completion / chat.completion.chunk 格式
  */
 
+const upstreamErrorHelper = require('../utils/upstreamErrorHelper')
+
 class CodexToOpenAIConverter {
   constructor() {
     // 工具名缩短映射（buildRequestFromOpenAI 填充，响应转换时逆向恢复）
@@ -31,6 +33,9 @@ class CodexToOpenAIConverter {
   convertStreamChunk(eventData, model, state) {
     const { type } = eventData
     if (!type) {
+      if (eventData?.error) {
+        return this.convertErrorToOpenAISSE(eventData)
+      }
       return []
     }
 
@@ -82,6 +87,10 @@ class CodexToOpenAIConverter {
    * @returns {Object}
    */
   convertResponse(responseData, model) {
+    if (responseData?.error || responseData?.type === 'error') {
+      return this.convertErrorToOpenAIResponse(responseData)
+    }
+
     // 自动检测：response.completed 事件包装 vs 直接响应对象
     const resp = responseData.type === 'response.completed' ? responseData.response : responseData
 
@@ -120,16 +129,12 @@ class CodexToOpenAIConverter {
       message.tool_calls = toolCalls
     }
 
-    // response.failed → 返回 error 结构（与流式 _handleResponseError 一致）
+    // response.failed → 返回安全错误结构（与流式 _handleResponseError 一致）
     if (resp.status === 'failed') {
-      const err = resp.error || {}
-      return {
-        error: {
-          message: err.message || 'Response failed',
-          type: err.type || 'server_error',
-          code: err.code || null
-        }
-      }
+      return this.convertErrorToOpenAIResponse({
+        status: resp.status_code || resp.statusCode,
+        error: resp.error || {}
+      })
     }
 
     const finishReason = toolCalls.length > 0 ? 'tool_calls' : this._mapResponseStatus(resp)
@@ -264,17 +269,13 @@ class CodexToOpenAIConverter {
     const resp = eventData.response || {}
     const results = []
 
-    // response.failed → 转为 error SSE 事件（保留错误语义）
+    // response.failed → 转为安全的 OpenAI error SSE 事件（不泄露上游细节）
     if (resp.status === 'failed') {
-      const err = resp.error || {}
       results.push(
-        `data: ${JSON.stringify({
-          error: {
-            message: err.message || 'Response failed',
-            type: err.type || 'server_error',
-            code: err.code || null
-          }
-        })}\n\n`
+        ...this.convertErrorToOpenAISSE({
+          status: resp.status_code || resp.statusCode,
+          error: resp.error || {}
+        })
       )
     }
 
@@ -297,18 +298,72 @@ class CodexToOpenAIConverter {
   }
 
   _handleStreamError(eventData) {
-    // type: "error" → 转为 OpenAI 格式的 error SSE 事件
-    const errorObj = {
-      error: {
-        message: eventData.message || 'Unknown error',
-        type: 'server_error',
-        code: eventData.code || null
-      }
-    }
-    return [`data: ${JSON.stringify(errorObj)}\n\n`]
+    // type: "error" → 转为安全的 OpenAI error SSE 事件
+    return this.convertErrorToOpenAISSE(eventData)
   }
 
   // --- 工具方法 ---
+
+  convertErrorToOpenAIResponse(errorData, fallbackStatusCode = 500) {
+    const statusCode = this._inferErrorStatusCode(errorData, fallbackStatusCode)
+    return upstreamErrorHelper.sanitizeErrorForClient(errorData, { statusCode })
+  }
+
+  convertErrorToOpenAISSE(errorData, fallbackStatusCode = 500) {
+    return [
+      `data: ${JSON.stringify(this.convertErrorToOpenAIResponse(errorData, fallbackStatusCode))}\n\n`
+    ]
+  }
+
+  _inferErrorStatusCode(errorData, fallbackStatusCode = 500) {
+    const candidates = [
+      errorData?.status,
+      errorData?.statusCode,
+      errorData?.status_code,
+      errorData?.error?.status,
+      errorData?.error?.statusCode,
+      errorData?.error?.status_code
+    ]
+
+    for (const candidate of candidates) {
+      const numeric = Number(candidate)
+      if (Number.isInteger(numeric) && numeric >= 100 && numeric <= 599) {
+        return numeric
+      }
+    }
+
+    const error =
+      errorData?.error && typeof errorData.error === 'object' ? errorData.error : errorData
+    const text = [error?.type, error?.code, error?.message, errorData?.type, errorData?.code]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+
+    if (/429|rate[_ -]?limit|too[_ -]?many[_ -]?requests|usage[_ -]?limit/.test(text)) {
+      return 429
+    }
+    if (/401|auth|unauthori[sz]ed|invalid[_ -]?api[_ -]?key/.test(text)) {
+      return 401
+    }
+    if (/403|forbidden|permission/.test(text)) {
+      return 403
+    }
+    if (/404|not[_ -]?found/.test(text)) {
+      return 404
+    }
+    if (/408|504|timeout|timed out/.test(text)) {
+      return 504
+    }
+    if (/400|bad[_ -]?request|invalid[_ -]?request/.test(text)) {
+      return 400
+    }
+    if (/529|overload/.test(text)) {
+      return 529
+    }
+
+    const fallback = Number(fallbackStatusCode)
+    return Number.isInteger(fallback) && fallback >= 100 && fallback <= 599 ? fallback : 500
+  }
 
   _emitChunk(state, model, delta) {
     const chunk = this._makeChunk(state, model)

@@ -65,6 +65,10 @@ jest.mock('../src/services/apiKeyService', () => ({
   recordUsage: jest.fn()
 }))
 
+jest.mock('../src/services/modelService', () => ({
+  getAllModels: jest.fn()
+}))
+
 jest.mock('../src/models/redis', () => ({
   getUsageStats: jest.fn()
 }))
@@ -112,7 +116,12 @@ const openaiResponsesAccountService = require('../src/services/account/openaiRes
 const openaiAccountService = require('../src/services/account/openaiAccountService')
 const openaiImageRelayService = require('../src/services/relay/openaiImageRelayService')
 const openaiTokenImageRelayService = require('../src/services/relay/openaiTokenImageRelayService')
+const modelService = require('../src/services/modelService')
 const openaiRoutes = require('../src/routes/openaiRoutes')
+const registeredGetRoutes = mockRouter.get.mock.calls.map(([path, _middleware, handler]) => ({
+  path,
+  handler
+}))
 
 function createReq(overrides = {}) {
   return {
@@ -270,5 +279,68 @@ describe('openai image routes', () => {
     expect(res.payload.error.code).toBe('unsupported_media_type')
     expect(unifiedOpenAIScheduler.selectAccountForApiKey).not.toHaveBeenCalled()
     expect(openaiImageRelayService.handleEdits).not.toHaveBeenCalled()
+  })
+})
+
+describe('openai models route', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  test('registers /v1/models and returns configured model list', async () => {
+    const configuredModels = [
+      { id: 'gpt-5.4', object: 'model', created: 1710000000, owned_by: 'openai' },
+      {
+        id: 'claude-sonnet-4-5-20250929',
+        object: 'model',
+        created: 1710000000,
+        owned_by: 'anthropic'
+      }
+    ]
+    modelService.getAllModels.mockResolvedValue(configuredModels)
+    const req = createReq({
+      method: 'GET',
+      path: '/v1/models',
+      originalUrl: '/openai/v1/models'
+    })
+    const res = createRes()
+
+    await openaiRoutes.handleModels(req, res)
+
+    expect(registeredGetRoutes).toContainEqual({
+      path: '/v1/models',
+      handler: openaiRoutes.handleModels
+    })
+    expect(modelService.getAllModels).toHaveBeenCalled()
+    expect(res.json).toHaveBeenCalledWith({
+      object: 'list',
+      data: configuredModels
+    })
+  })
+
+  test('filters restricted models as a blacklist', async () => {
+    modelService.getAllModels.mockResolvedValue([
+      { id: 'gpt-5.4', object: 'model', created: 1710000000, owned_by: 'openai' },
+      { id: 'gpt-5.4-pro', object: 'model', created: 1710000000, owned_by: 'openai' }
+    ])
+    const req = createReq({
+      method: 'GET',
+      path: '/v1/models',
+      originalUrl: '/openai/v1/models',
+      apiKey: {
+        id: 'key-1',
+        permissions: ['openai'],
+        enableModelRestriction: true,
+        restrictedModels: ['gpt-5.4-pro']
+      }
+    })
+    const res = createRes()
+
+    await openaiRoutes.handleModels(req, res)
+
+    expect(res.json).toHaveBeenCalledWith({
+      object: 'list',
+      data: [{ id: 'gpt-5.4', object: 'model', created: 1710000000, owned_by: 'openai' }]
+    })
   })
 })

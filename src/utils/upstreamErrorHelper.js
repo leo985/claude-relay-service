@@ -451,6 +451,8 @@ const markTempUnavailable = async (
       logger.info(
         `⏭️ [UpstreamError] Skip temp-unavailable for account ${accountId} (${accountType}), reason: ${policyDecision.reason}`
       )
+      // Skipping cooldown should not hide the upstream failure from history/statistics.
+      recordErrorHistory(accountId, accountType, statusCode, errorType, context).catch(() => {})
       return { success: true, skipped: true, reason: policyDecision.reason }
     }
 
@@ -617,18 +619,185 @@ const getAllTempUnavailable = async () => {
   }
 }
 
-// 清洗上游错误数据，去除内部路由标识（如 [codex/codex]）
-const sanitizeErrorForClient = (errorData) => {
-  if (!errorData || typeof errorData !== 'object') {
-    return errorData
+const normalizeStatusCode = (statusCode, fallback = 500) => {
+  const numeric = Number(statusCode)
+  return Number.isInteger(numeric) && numeric >= 100 && numeric <= 599 ? numeric : fallback
+}
+
+const parseMaybeJson = (value) => {
+  if (!value) {
+    return value
   }
-  try {
-    const str = JSON.stringify(errorData)
-    const cleaned = str.replace(/ \[[^\]/]+\/[^\]]+\]/g, '')
-    return JSON.parse(cleaned)
-  } catch {
-    return errorData
+  if (Buffer.isBuffer(value)) {
+    return parseMaybeJson(value.toString('utf8'))
   }
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value)
+    } catch {
+      return value
+    }
+  }
+  return value
+}
+
+const getNestedValue = (source, paths) => {
+  const parsed = parseMaybeJson(source)
+  if (!parsed || typeof parsed !== 'object') {
+    return null
+  }
+
+  for (const path of paths) {
+    const value = path.reduce((current, key) => current?.[key], parsed)
+    if (value !== undefined && value !== null && value !== '') {
+      return value
+    }
+  }
+
+  return null
+}
+
+const extractStatusCodeFromErrorData = (errorData) =>
+  getNestedValue(errorData, [
+    ['status'],
+    ['statusCode'],
+    ['error', 'status'],
+    ['error', 'statusCode'],
+    ['response', 'status']
+  ])
+
+const extractResetSecondsFromErrorData = (errorData) => {
+  const raw = getNestedValue(errorData, [
+    ['resets_in_seconds'],
+    ['retry_after'],
+    ['error', 'resets_in_seconds'],
+    ['error', 'retry_after'],
+    ['detail', 'resets_in_seconds'],
+    ['detail', 'retry_after']
+  ])
+  const numeric = Number(raw)
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : null
+}
+
+const getSafeUpstreamErrorMetadata = (statusCode) => {
+  const status = normalizeStatusCode(statusCode)
+
+  if (status === 400) {
+    return {
+      message: 'Upstream rejected the request',
+      type: 'invalid_request_error',
+      code: 'upstream_bad_request'
+    }
+  }
+  if (status === 401) {
+    return {
+      message: 'Upstream authentication failed',
+      type: 'authentication_error',
+      code: 'upstream_auth_error'
+    }
+  }
+  if (status === 402) {
+    return {
+      message: 'Upstream payment required',
+      type: 'billing_error',
+      code: 'upstream_payment_required'
+    }
+  }
+  if (status === 403) {
+    return {
+      message: 'Upstream permission denied',
+      type: 'permission_error',
+      code: 'upstream_permission_denied'
+    }
+  }
+  if (status === 404) {
+    return {
+      message: 'Upstream resource not found',
+      type: 'not_found_error',
+      code: 'upstream_not_found'
+    }
+  }
+  if (status === 408 || status === 504) {
+    return {
+      message: 'Upstream request timeout',
+      type: 'timeout_error',
+      code: 'upstream_timeout'
+    }
+  }
+  if (status === 429) {
+    return {
+      message: 'Upstream rate limit exceeded',
+      type: 'rate_limit_error',
+      code: 'upstream_rate_limited'
+    }
+  }
+  if (status === 529) {
+    return {
+      message: 'Upstream service overloaded',
+      type: 'overloaded_error',
+      code: 'upstream_overloaded'
+    }
+  }
+  if (status >= 500) {
+    return {
+      message: 'Upstream service temporarily unavailable',
+      type: 'api_error',
+      code: 'upstream_service_error'
+    }
+  }
+
+  return {
+    message: 'Upstream request failed',
+    type: 'api_error',
+    code: 'upstream_error'
+  }
+}
+
+const buildSafeUpstreamErrorForClient = (statusCode, errorData, options = {}) => {
+  const {
+    format = 'openai',
+    includeStatus = false,
+    preserveRateLimitDetails = true,
+    retryAfterSeconds = null
+  } = options
+  const status = normalizeStatusCode(
+    statusCode,
+    normalizeStatusCode(extractStatusCodeFromErrorData(errorData))
+  )
+  const safeMeta = getSafeUpstreamErrorMetadata(status)
+  const safeError = { ...safeMeta }
+
+  if (status === 429 && preserveRateLimitDetails) {
+    const resetsInSeconds =
+      retryAfterSeconds !== null && retryAfterSeconds !== undefined
+        ? Number(retryAfterSeconds)
+        : extractResetSecondsFromErrorData(errorData)
+    if (Number.isFinite(resetsInSeconds) && resetsInSeconds >= 0) {
+      safeError.resets_in_seconds = resetsInSeconds
+    }
+  }
+
+  const payload =
+    format === 'anthropic'
+      ? {
+          type: 'error',
+          error: safeError
+        }
+      : {
+          error: safeError
+        }
+
+  if (includeStatus) {
+    payload.status = status
+  }
+
+  return payload
+}
+
+// 客户端只返回标准化错误；原始上游错误只保留在日志/错误历史中。
+const sanitizeErrorForClient = (errorData, options = {}) => {
+  const statusCode = options.statusCode ?? extractStatusCodeFromErrorData(errorData)
+  return buildSafeUpstreamErrorForClient(statusCode, errorData, options)
 }
 
 module.exports = {
@@ -638,6 +807,7 @@ module.exports = {
   getAllTempUnavailable,
   classifyError,
   parseRetryAfter,
+  buildSafeUpstreamErrorForClient,
   sanitizeErrorForClient,
   recordErrorHistory,
   getErrorHistory,

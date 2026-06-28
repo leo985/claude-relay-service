@@ -49,7 +49,7 @@
     <div class="mb-4 sm:mb-6 md:mb-8">
       <div class="flex justify-center">
         <div
-          class="inline-flex w-full max-w-2xl flex-wrap justify-center gap-1 rounded-full border border-white/20 bg-white/10 p-1 shadow-lg backdrop-blur-xl sm:w-auto sm:flex-nowrap"
+          class="inline-flex w-full max-w-2xl flex-wrap justify-center gap-1 rounded-full border border-gray-200 bg-gray-100 p-1 dark:border-gray-700 dark:bg-gray-800 sm:w-auto sm:flex-nowrap"
         >
           <button
             :class="['tab-pill-button', currentTab === 'stats' ? 'active' : '']"
@@ -1057,76 +1057,64 @@ watch(apiKey, (newValue) => {
 /* 时间范围按钮 */
 .period-btn {
   position: relative;
-  overflow: hidden;
-  border-radius: 12px;
+  border-radius: 8px;
   font-weight: 500;
-  letter-spacing: 0.025em;
-  transition: all 0.3s ease;
-  border: none;
+  transition: all 0.2s ease;
+  border: 1px solid transparent;
   cursor: pointer;
 }
 
 .period-btn.active {
-  background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+  background: var(--primary-color);
   color: white;
-  box-shadow:
-    0 10px 15px -3px rgba(var(--primary-rgb), 0.3),
-    0 4px 6px -2px rgba(var(--primary-rgb), 0.05);
-  transform: translateY(-1px);
+  border-color: var(--primary-color);
 }
 
 .period-btn:not(.active) {
   color: #374151;
-  background: rgba(255, 255, 255, 0.6);
-  border: 1px solid rgba(229, 231, 235, 0.5);
+  background: white;
+  border: 1px solid #e5e7eb;
 }
 
 :global(html.dark) .period-btn:not(.active) {
   color: #e5e7eb;
-  background: rgba(55, 65, 81, 0.4);
-  border: 1px solid rgba(75, 85, 99, 0.5);
+  background: #1f2937;
+  border: 1px solid #374151;
 }
 
 .period-btn:not(.active):hover {
-  background: rgba(255, 255, 255, 0.8);
-  color: #1f2937;
-  border-color: rgba(209, 213, 219, 0.8);
+  background: #f9fafb;
+  color: #111827;
+  border-color: #d1d5db;
 }
 
 :global(html.dark) .period-btn:not(.active):hover {
-  background: rgba(75, 85, 99, 0.6);
+  background: #374151;
   color: #ffffff;
-  border-color: rgba(107, 114, 128, 0.8);
+  border-color: #4b5563;
 }
 
 /* 测试按钮样式 */
 .test-btn {
   position: relative;
-  overflow: hidden;
-  border-radius: 12px;
+  border-radius: 8px;
   font-weight: 500;
-  letter-spacing: 0.025em;
-  transition: all 0.3s ease;
-  border: none;
+  transition: all 0.2s ease;
+  border: 1px solid transparent;
   cursor: pointer;
-  background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+  background: #06b6d4; /* cyan-500 */
   color: white;
-  box-shadow:
-    0 4px 10px -2px rgba(6, 182, 212, 0.3),
-    0 2px 4px -1px rgba(6, 182, 212, 0.1);
+  border-color: #06b6d4;
 }
 
 .test-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow:
-    0 8px 15px -3px rgba(6, 182, 212, 0.4),
-    0 4px 6px -2px rgba(6, 182, 212, 0.15);
+  background: #0891b2; /* cyan-600 */
+  border-color: #0891b2;
 }
 
 .test-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-  transform: none;
 }
 
 /* Tab 胶囊按钮样式 */
@@ -1135,7 +1123,7 @@ watch(apiKey, (newValue) => {
   border-radius: 9999px;
   font-weight: 500;
   font-size: 0.875rem;
-  color: rgba(255, 255, 255, 0.8);
+  color: #4b5563; /* gray-600 */
   background: transparent;
   border: none;
   cursor: pointer;
@@ -1150,7 +1138,7 @@ watch(apiKey, (newValue) => {
 
 /* 暗夜模式下的Tab按钮基础样式 */
 :global(html.dark) .tab-pill-button {
-  color: rgba(209, 213, 219, 0.8);
+  color: #9ca3af; /* gray-400 */
 }
 
 @media (min-width: 768px) {
@@ -1161,29 +1149,25 @@ watch(apiKey, (newValue) => {
 }
 
 .tab-pill-button:hover {
-  color: white;
-  background: rgba(255, 255, 255, 0.1);
+  color: #111827; /* gray-900 */
+  background: rgba(0, 0, 0, 0.05);
 }
 
 :global(html.dark) .tab-pill-button:hover {
   color: #f3f4f6;
-  background: rgba(100, 116, 139, 0.2);
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .tab-pill-button.active {
   background: white;
-  color: var(--secondary-color);
-  box-shadow:
-    0 4px 6px -1px rgba(0, 0, 0, 0.1),
-    0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  color: var(--primary-color);
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
 }
 
 :global(html.dark) .tab-pill-button.active {
-  background: rgba(71, 85, 105, 0.9);
-  color: #f3f4f6;
-  box-shadow:
-    0 4px 6px -1px rgba(0, 0, 0, 0.3),
-    0 2px 4px -1px rgba(0, 0, 0, 0.2);
+  background: #374151; /* gray-700 */
+  color: #818cf8; /* indigo-400 */
+  box-shadow: none;
 }
 
 .tab-pill-button i {

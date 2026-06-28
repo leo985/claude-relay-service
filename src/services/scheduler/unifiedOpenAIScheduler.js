@@ -25,7 +25,14 @@ class UnifiedOpenAIScheduler {
       hasImageGeneration: requestFeatures.hasImageGeneration === true,
       imageOperation: requestFeatures.imageOperation || '',
       imageModel: requestFeatures.imageModel || null,
-      openaiResponsesOnly: requestFeatures.openaiResponsesOnly === true
+      openaiResponsesOnly: requestFeatures.openaiResponsesOnly === true,
+      allowOpenAITokenForAnthropicImages:
+        requestFeatures.allowOpenAITokenForAnthropicImages === true,
+      allowOpenAITokenForOpenAICompatibleImages:
+        requestFeatures.allowOpenAITokenForOpenAICompatibleImages === true,
+      excludeAccountIds: Array.isArray(requestFeatures.excludeAccountIds)
+        ? requestFeatures.excludeAccountIds.filter(Boolean)
+        : []
     }
   }
 
@@ -73,6 +80,8 @@ class UnifiedOpenAIScheduler {
       hasImages: features.hasImages,
       hasReasoning: features.hasReasoning,
       hasImageGeneration: features.hasImageGeneration,
+      allowOpenAITokenForAnthropicImages: features.allowOpenAITokenForAnthropicImages,
+      allowOpenAITokenForOpenAICompatibleImages: features.allowOpenAITokenForOpenAICompatibleImages,
       imageOperation: features.imageOperation || ''
     }
   }
@@ -84,6 +93,38 @@ class UnifiedOpenAIScheduler {
       accountName: account?.name || '',
       reason
     })
+  }
+
+  _canUseOpenAITokenForAnthropicImages(account, requestFeatures = {}) {
+    const features = this._normalizeRequestFeatures(requestFeatures)
+    return (
+      features.allowOpenAITokenForAnthropicImages === true &&
+      features.endpointKind === 'passthrough' &&
+      features.hasImages === true &&
+      this._canUseOpenAITokenForImageInput(account)
+    )
+  }
+
+  _canUseOpenAITokenForOpenAICompatibleImages(account, requestFeatures = {}) {
+    const features = this._normalizeRequestFeatures(requestFeatures)
+    return (
+      features.allowOpenAITokenForOpenAICompatibleImages === true &&
+      (features.endpointKind === 'responses' || features.endpointKind === 'chat_completions') &&
+      features.hasImages === true &&
+      this._canUseOpenAITokenForImageInput(account)
+    )
+  }
+
+  _canUseOpenAITokenWhenResponsesOnly(account, requestFeatures = {}) {
+    return (
+      this._canUseOpenAITokenForAnthropicImages(account, requestFeatures) ||
+      this._canUseOpenAITokenForOpenAICompatibleImages(account, requestFeatures)
+    )
+  }
+
+  _canUseOpenAITokenForImageInput(account) {
+    // Codex token accounts support image input unless an admin explicitly disables it.
+    return account?.supportsImages !== false && account?.supportsImages !== 'false'
   }
 
   _formatGroupSkipReasons(skipReasons) {
@@ -295,6 +336,17 @@ class UnifiedOpenAIScheduler {
                 error.statusCode = 400
                 throw error
               }
+
+              if (
+                requestFeatures.hasImages &&
+                !this._canUseOpenAITokenForImageInput(boundAccount)
+              ) {
+                const errorMsg = `Dedicated account ${boundAccount.name} does not support image input`
+                logger.warn(`⚠️ ${errorMsg}`)
+                const error = new Error(errorMsg)
+                error.statusCode = 400
+                throw error
+              }
             } else {
               const hasRateLimitFlag = this._isRateLimited(boundAccount.rateLimitStatus)
               if (hasRateLimitFlag) {
@@ -401,9 +453,15 @@ class UnifiedOpenAIScheduler {
 
       // 如果有会话哈希，检查是否有已映射的账户
       if (sessionHash) {
+        const excludedAccountIds = new Set(requestFeatures.excludeAccountIds || [])
         const mappedAccount = await this._getSessionMapping(sessionHash)
         if (mappedAccount) {
-          if (
+          if (excludedAccountIds.has(mappedAccount.accountId)) {
+            logger.warn(
+              `⚠️ Sticky session account ${mappedAccount.accountId} is excluded for retry, selecting new account`
+            )
+            await this._deleteSessionMapping(sessionHash)
+          } else if (
             !this._doesSessionMappingMatchRequest(mappedAccount, requestedModel, requestFeatures)
           ) {
             logger.warn(
@@ -499,15 +557,20 @@ class UnifiedOpenAIScheduler {
   // 📋 获取所有可用账户（仅共享池）
   async _getAllAvailableAccounts(apiKeyData, requestedModel = null, requestFeatures = {}) {
     requestFeatures = this._normalizeRequestFeatures(requestFeatures)
+    const excludedAccountIds = new Set(requestFeatures.excludeAccountIds || [])
     const availableAccounts = []
 
     // 注意：专属账户的处理已经在 selectAccountForApiKey 中完成
     // 这里只处理共享池账户
 
     // 获取所有OpenAI账户（共享池）
-    const openaiAccounts = requestFeatures.openaiResponsesOnly
-      ? []
-      : await openaiAccountService.getAllAccounts()
+    const includeOpenAITokenAccounts =
+      !requestFeatures.openaiResponsesOnly ||
+      requestFeatures.allowOpenAITokenForAnthropicImages === true ||
+      requestFeatures.allowOpenAITokenForOpenAICompatibleImages === true
+    const openaiAccounts = includeOpenAITokenAccounts
+      ? await openaiAccountService.getAllAccounts()
+      : []
     for (let account of openaiAccounts) {
       if (
         account.isActive &&
@@ -515,6 +578,10 @@ class UnifiedOpenAIScheduler {
         (account.accountType === 'shared' || !account.accountType) // 兼容旧数据
       ) {
         const accountId = account.id || account.accountId
+        if (excludedAccountIds.has(accountId)) {
+          logger.debug(`⏭️ Skipping OpenAI account ${account.name} - excluded for retry`)
+          continue
+        }
 
         const readiness = await this._ensureAccountReadyForScheduling(account, accountId, {
           sanitized: true
@@ -579,6 +646,21 @@ class UnifiedOpenAIScheduler {
           continue
         }
 
+        if (requestFeatures.hasImages && !this._canUseOpenAITokenForImageInput(account)) {
+          logger.debug(`⏭️ Skipping OpenAI account ${account.name} - image input not supported`)
+          continue
+        }
+
+        if (
+          requestFeatures.openaiResponsesOnly &&
+          !this._canUseOpenAITokenWhenResponsesOnly(account, requestFeatures)
+        ) {
+          logger.debug(
+            `⏭️ Skipping OpenAI account ${account.name} - OpenAI-Responses compatible account required`
+          )
+          continue
+        }
+
         availableAccounts.push({
           ...account,
           accountId: account.id,
@@ -597,6 +679,11 @@ class UnifiedOpenAIScheduler {
         account.status !== 'error' &&
         (account.accountType === 'shared' || !account.accountType)
       ) {
+        if (excludedAccountIds.has(account.id)) {
+          logger.debug(`⏭️ Skipping OpenAI-Responses account ${account.name} - excluded for retry`)
+          continue
+        }
+
         // 检查 rateLimitStatus 或 status === 'rateLimited'
         const hasRateLimitFlag =
           this._hasRateLimitFlag(account.rateLimitStatus) || account.status === 'rateLimited'
@@ -724,6 +811,13 @@ class UnifiedOpenAIScheduler {
           return false
         }
 
+        if (
+          requestFeatures.openaiResponsesOnly &&
+          !this._canUseOpenAITokenWhenResponsesOnly(account, requestFeatures)
+        ) {
+          return false
+        }
+
         if (requestedModel && account.supportedModels && account.supportedModels.length > 0) {
           return account.supportedModels.includes(requestedModel)
         }
@@ -776,7 +870,15 @@ class UnifiedOpenAIScheduler {
 
   _doesSessionMappingMatchRequest(mappedAccount, requestedModel = null, requestFeatures = {}) {
     const features = this._normalizeRequestFeatures(requestFeatures)
-    if (features.openaiResponsesOnly && mappedAccount.accountType !== 'openai-responses') {
+    if (
+      features.openaiResponsesOnly &&
+      mappedAccount.accountType !== 'openai-responses' &&
+      !(
+        mappedAccount.accountType === 'openai' &&
+        (features.allowOpenAITokenForAnthropicImages === true ||
+          features.allowOpenAITokenForOpenAICompatibleImages === true)
+      )
+    ) {
       return false
     }
     if (
@@ -798,7 +900,9 @@ class UnifiedOpenAIScheduler {
       'hasTools',
       'hasImages',
       'hasReasoning',
-      'hasImageGeneration'
+      'hasImageGeneration',
+      'allowOpenAITokenForAnthropicImages',
+      'allowOpenAITokenForOpenAICompatibleImages'
     ]) {
       if (
         Object.prototype.hasOwnProperty.call(mappedAccount, key) &&
@@ -1109,9 +1213,15 @@ class UnifiedOpenAIScheduler {
 
       // 如果有会话哈希，检查是否有已映射的账户
       if (sessionHash) {
+        const excludedAccountIds = new Set(requestFeatures.excludeAccountIds || [])
         const mappedAccount = await this._getSessionMapping(sessionHash)
         if (mappedAccount) {
-          if (
+          if (excludedAccountIds.has(mappedAccount.accountId)) {
+            logger.warn(
+              `⚠️ Sticky session account ${mappedAccount.accountId} is excluded for retry, selecting new account`
+            )
+            await this._deleteSessionMapping(sessionHash)
+          } else if (
             !this._doesSessionMappingMatchRequest(mappedAccount, requestedModel, requestFeatures)
           ) {
             await this._deleteSessionMapping(sessionHash)
@@ -1153,6 +1263,7 @@ class UnifiedOpenAIScheduler {
       // 获取可用的分组成员账户（支持 OpenAI 和 OpenAI-Responses 两种类型）
       const availableAccounts = []
       const skipReasons = []
+      const excludedAccountIds = new Set(requestFeatures.excludeAccountIds || [])
       for (const memberId of memberIds) {
         // 首先尝试从 OpenAI 账户服务获取
         let account = await openaiAccountService.getAccount(memberId)
@@ -1169,15 +1280,42 @@ class UnifiedOpenAIScheduler {
           continue
         }
 
-        if (requestFeatures.openaiResponsesOnly && accountType !== 'openai-responses') {
-          this._recordGroupSkip(
-            skipReasons,
-            memberId,
-            accountType,
-            account,
-            'openai_responses_required'
-          )
+        const accountId = account.id || memberId
+        if (excludedAccountIds.has(accountId)) {
+          this._recordGroupSkip(skipReasons, memberId, accountType, account, 'excluded_for_retry')
           continue
+        }
+
+        if (requestFeatures.openaiResponsesOnly && accountType !== 'openai-responses') {
+          const canUseOpenAITokenWhenResponsesOnly =
+            accountType === 'openai' &&
+            this._canUseOpenAITokenWhenResponsesOnly(account, requestFeatures)
+          if (canUseOpenAITokenWhenResponsesOnly) {
+            // Continue with normal token-account readiness checks below.
+          } else if (
+            accountType === 'openai' &&
+            (requestFeatures.allowOpenAITokenForAnthropicImages ||
+              requestFeatures.allowOpenAITokenForOpenAICompatibleImages) &&
+            requestFeatures.hasImages
+          ) {
+            this._recordGroupSkip(
+              skipReasons,
+              memberId,
+              accountType,
+              account,
+              'images_not_supported'
+            )
+            continue
+          } else {
+            this._recordGroupSkip(
+              skipReasons,
+              memberId,
+              accountType,
+              account,
+              'openai_responses_required'
+            )
+            continue
+          }
         }
 
         if (account.isActive !== true && account.isActive !== 'true') {
@@ -1304,6 +1442,18 @@ class UnifiedOpenAIScheduler {
             )
             continue
           }
+        }
+
+        if (
+          accountType === 'openai' &&
+          requestFeatures.hasImages &&
+          !this._canUseOpenAITokenForImageInput(account)
+        ) {
+          logger.debug(
+            `⏭️ Skipping group member OpenAI account ${account.name} - image input not supported`
+          )
+          this._recordGroupSkip(skipReasons, memberId, accountType, account, 'images_not_supported')
+          continue
         }
 
         let modelMatchRank = 0

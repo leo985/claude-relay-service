@@ -26,8 +26,10 @@ jest.mock('../src/utils/logger', () => ({
 
 const {
   ERROR_STATS_TTL,
+  buildSafeUpstreamErrorForClient,
   clearErrorHistory,
-  recordErrorHistory
+  recordErrorHistory,
+  sanitizeErrorForClient
 } = require('../src/utils/upstreamErrorHelper')
 
 describe('upstreamErrorHelper error stats aggregation', () => {
@@ -69,5 +71,50 @@ describe('upstreamErrorHelper error stats aggregation', () => {
     expect(pipeline.del).toHaveBeenCalledWith('account_error_stats:daily:openai:acc-1:2026-06-23')
     expect(pipeline.del).toHaveBeenCalledTimes(61)
     expect(pipeline.exec).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('upstreamErrorHelper client error sanitization', () => {
+  it('masks non-429 upstream error details before returning to clients', () => {
+    const payload = sanitizeErrorForClient(
+      {
+        error: {
+          message: 'invalid token sk-secret leaked detail [codex/codex]',
+          type: 'auth_error',
+          code: 'invalid_api_key'
+        }
+      },
+      { statusCode: 401 }
+    )
+
+    expect(payload).toEqual({
+      error: {
+        message: 'Upstream authentication failed',
+        type: 'authentication_error',
+        code: 'upstream_auth_error'
+      }
+    })
+  })
+
+  it('keeps only retry timing for 429 errors', () => {
+    const payload = buildSafeUpstreamErrorForClient(
+      429,
+      {
+        error: {
+          message: 'quota exhausted for account acct-secret',
+          resets_in_seconds: 123
+        }
+      },
+      { retryAfterSeconds: 60 }
+    )
+
+    expect(payload).toEqual({
+      error: {
+        message: 'Upstream rate limit exceeded',
+        type: 'rate_limit_error',
+        code: 'upstream_rate_limited',
+        resets_in_seconds: 60
+      }
+    })
   })
 })

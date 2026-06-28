@@ -50,11 +50,11 @@ const props = defineProps({
 
 const iconBgClass = computed(() => {
   const colorMap = {
-    primary: 'bg-gradient-to-br from-blue-500 to-purple-500',
-    success: 'bg-gradient-to-br from-green-500 to-emerald-500',
-    warning: 'bg-gradient-to-br from-yellow-500 to-orange-500',
-    danger: 'bg-gradient-to-br from-red-500 to-pink-500',
-    info: 'bg-gradient-to-br from-cyan-500 to-blue-500'
+    primary: 'bg-indigo-100 text-indigo-600',
+    success: 'bg-green-100 text-green-600',
+    warning: 'bg-amber-100 text-amber-600',
+    danger: 'bg-red-100 text-red-600',
+    info: 'bg-cyan-100 text-cyan-600'
   }
   return colorMap[props.iconColor] || colorMap.primary
 })
