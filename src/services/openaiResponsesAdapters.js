@@ -55,6 +55,18 @@ class OpenAIResponsesAdapters {
       result.reasoning_effort = body.reasoning_effort
     }
 
+    // 兼容智谱/火山方舟等供应商的非标准触发参数：
+    // 当 Responses 客户端表达了 reasoning 意图（effort / summary / include），
+    // 在 chat completions body 上额外注入 enable_thinking=true。
+    // OpenAI 官方端点会忽略未知字段，因此跨供应商安全。
+    const resolvedEffort = this._resolveReasoningEffort(body)
+    if (resolvedEffort) {
+      result.enable_thinking = true
+      if (!result.reasoning_effort) {
+        result.reasoning_effort = resolvedEffort
+      }
+    }
+
     const tools = this._responsesToolsToChatTools(body.tools || [])
     if (tools.length > 0) {
       result.tools = tools
@@ -146,7 +158,7 @@ class OpenAIResponsesAdapters {
       result.tool_choice = this._chatToolChoiceToAnthropic(chatBody.tool_choice)
     }
 
-    const reasoningEffort = this._resolveAnthropicThinkingEffort(responsesBody)
+    const reasoningEffort = this._resolveReasoningEffort(responsesBody)
     if (reasoningEffort && result.max_tokens > 1024) {
       result.thinking = {
         type: 'enabled',
@@ -161,11 +173,11 @@ class OpenAIResponsesAdapters {
   }
 
   /**
-   * 从 Responses 请求体中解析出 Anthropic thinking 应使用的 effort。
+   * 从 Responses 请求体中解析出适用的 reasoning effort。
    * 仅当客户端明确表达 reasoning 意图（effort / summary / include）且未显式禁用时返回 effort，
-   * 否则返回 null（不启用 thinking）。
+   * 否则返回 null（不启用 thinking）。同时服务于 Anthropic thinking 和 chat_completions enable_thinking。
    */
-  _resolveAnthropicThinkingEffort(responsesBody = {}) {
+  _resolveReasoningEffort(responsesBody = {}) {
     if (!responsesBody || typeof responsesBody !== 'object') {
       return null
     }

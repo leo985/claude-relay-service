@@ -86,6 +86,52 @@ describe('OpenAIResponsesAdapters', () => {
     expect(result.tool_choice).toEqual({ type: 'function', function: { name: 'apply_patch' } })
   })
 
+  test('forwards reasoning_effort and injects enable_thinking when Responses client requests reasoning', () => {
+    const result = adapters.buildChatCompletionsRequestFromResponses({
+      model: 'glm-5.2',
+      input: 'hi',
+      reasoning: { effort: 'medium' },
+      include: ['reasoning.encrypted_content'],
+      max_output_tokens: 4096,
+      stream: true
+    })
+
+    expect(result.reasoning_effort).toBe('medium')
+    expect(result.enable_thinking).toBe(true)
+  })
+
+  test('injects enable_thinking with default effort when only include hints reasoning intent', () => {
+    const result = adapters.buildChatCompletionsRequestFromResponses({
+      model: 'glm-5.2',
+      input: 'hi',
+      include: ['reasoning.encrypted_content']
+    })
+
+    expect(result.enable_thinking).toBe(true)
+    expect(result.reasoning_effort).toBe('medium')
+  })
+
+  test('does not inject enable_thinking when reasoning is explicitly disabled', () => {
+    const result = adapters.buildChatCompletionsRequestFromResponses({
+      model: 'glm-5.2',
+      input: 'hi',
+      reasoning: { effort: 'low', summary: 'none' }
+    })
+
+    // summary:'none' 表示不要思维链输出，但 effort 仍可作为标准 OpenAI 参数透传
+    expect(result.enable_thinking).toBeUndefined()
+  })
+
+  test('does not inject enable_thinking when no reasoning intent is present', () => {
+    const result = adapters.buildChatCompletionsRequestFromResponses({
+      model: 'glm-5.2',
+      input: 'hi'
+    })
+
+    expect(result.enable_thinking).toBeUndefined()
+    expect(result.reasoning_effort).toBeUndefined()
+  })
+
   test('round-trips Responses custom tool calls through Chat messages and responses', () => {
     const chatRequest = adapters.buildChatCompletionsRequestFromResponses({
       model: 'gpt-5.5',
