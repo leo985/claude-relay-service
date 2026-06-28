@@ -160,8 +160,16 @@ class OpenAIResponsesAdapters {
     const message = choice.message || {}
     const output = []
     const text = this._extractText(message.content)
+    const reasoningText = this._extractReasoningText(message)
 
-    if (text || !Array.isArray(message.tool_calls) || message.tool_calls.length === 0) {
+    if (reasoningText) {
+      output.push(this._buildReasoningResponseItem({ text: reasoningText }))
+    }
+
+    if (
+      text ||
+      (!reasoningText && (!Array.isArray(message.tool_calls) || message.tool_calls.length === 0))
+    ) {
       output.push({
         id: this._makeId('msg'),
         type: 'message',
@@ -206,6 +214,9 @@ class OpenAIResponsesAdapters {
     const adapterContext = this._normalizeAdapterContext(context)
     const output = []
     const textParts = []
+    const thinkingParts = []
+    const redactedThinkingParts = []
+    const toolItems = []
 
     const contentItems =
       typeof claudeResponse.content === 'string'
@@ -220,12 +231,32 @@ class OpenAIResponsesAdapters {
       } else if (item?.type === 'text') {
         textParts.push(item.text || '')
       } else if (item?.type === 'tool_use') {
-        output.push(this._anthropicToolUseToResponseItem(item, adapterContext))
+        toolItems.push(this._anthropicToolUseToResponseItem(item, adapterContext))
+      } else if (item?.type === 'thinking') {
+        const thinkingText = item.thinking || item.text || ''
+        if (thinkingText) {
+          thinkingParts.push(thinkingText)
+        }
+      } else if (item?.type === 'redacted_thinking') {
+        const encryptedContent =
+          item.data || item.encrypted_content || item.thinking || item.text || ''
+        if (encryptedContent) {
+          redactedThinkingParts.push(encryptedContent)
+        }
       }
     }
 
-    if (textParts.length > 0 || output.length === 0) {
-      output.unshift({
+    if (thinkingParts.length > 0 || redactedThinkingParts.length > 0) {
+      output.push(
+        this._buildReasoningResponseItem({
+          text: thinkingParts.join(''),
+          encryptedContent: redactedThinkingParts.join('')
+        })
+      )
+    }
+
+    if (textParts.length > 0 || (output.length === 0 && toolItems.length === 0)) {
+      output.push({
         id: this._makeId('msg'),
         type: 'message',
         status: 'completed',
@@ -236,6 +267,7 @@ class OpenAIResponsesAdapters {
             : []
       })
     }
+    output.push(...toolItems)
 
     const status = claudeResponse.stop_reason === 'max_tokens' ? 'incomplete' : 'completed'
     const response = {
@@ -267,8 +299,14 @@ class OpenAIResponsesAdapters {
       responseId: '',
       createdAt: Math.floor(Date.now() / 1000),
       model: '',
+      outputIndexCounter: 0,
+      reasoningStarted: false,
+      reasoningItemId: '',
+      reasoningOutputIndex: null,
+      reasoningText: '',
       messageStarted: false,
       messageItemId: '',
+      messageOutputIndex: null,
       text: '',
       toolCalls: new Map(),
       finishReason: null,
@@ -302,14 +340,29 @@ class OpenAIResponsesAdapters {
     const choices = Array.isArray(eventData.choices) ? eventData.choices : []
     for (const choice of choices) {
       const delta = choice.delta || {}
+      const reasoningDelta = this._extractReasoningText(delta)
+      if (reasoningDelta) {
+        chunks.push(...this._ensureReasoningOutput(state))
+        state.reasoningText += reasoningDelta
+        chunks.push(
+          this._sse('response.reasoning_summary_text.delta', {
+            type: 'response.reasoning_summary_text.delta',
+            item_id: state.reasoningItemId,
+            output_index: state.reasoningOutputIndex,
+            summary_index: 0,
+            delta: reasoningDelta
+          })
+        )
+      }
+
       if (delta.content) {
-        chunks.push(...this._ensureMessageOutput(state, requestedModel))
+        chunks.push(...this._ensureMessageOutput(state))
         state.text += delta.content
         chunks.push(
           this._sse('response.output_text.delta', {
             type: 'response.output_text.delta',
             item_id: state.messageItemId,
-            output_index: 0,
+            output_index: state.messageOutputIndex,
             content_index: 0,
             delta: delta.content
           })
@@ -322,7 +375,8 @@ class OpenAIResponsesAdapters {
           id: toolCall.id || this._makeId('call'),
           name: '',
           arguments: '',
-          announced: false
+          announced: false,
+          outputIndex: this._nextOutputIndex(state)
         }
         if (toolCall.id) {
           existing.id = toolCall.id
@@ -340,7 +394,7 @@ class OpenAIResponsesAdapters {
           chunks.push(
             this._sse('response.output_item.added', {
               type: 'response.output_item.added',
-              output_index: toolIndex,
+              output_index: existing.outputIndex,
               item
             })
           )
@@ -353,7 +407,7 @@ class OpenAIResponsesAdapters {
               this._sse('response.function_call_arguments.delta', {
                 type: 'response.function_call_arguments.delta',
                 item_id: existing.id,
-                output_index: toolIndex,
+                output_index: existing.outputIndex,
                 delta: toolCall.function.arguments
               })
             )
@@ -377,6 +431,39 @@ class OpenAIResponsesAdapters {
 
     const output = []
 
+    if (state.reasoningStarted) {
+      const reasoningItem = this._buildReasoningResponseItem({
+        id: state.reasoningItemId,
+        text: state.reasoningText
+      })
+      output.push(reasoningItem)
+      chunks.push(
+        this._sse('response.reasoning_summary_text.done', {
+          type: 'response.reasoning_summary_text.done',
+          item_id: state.reasoningItemId,
+          output_index: state.reasoningOutputIndex,
+          summary_index: 0,
+          text: state.reasoningText
+        })
+      )
+      chunks.push(
+        this._sse('response.reasoning_summary_part.done', {
+          type: 'response.reasoning_summary_part.done',
+          item_id: state.reasoningItemId,
+          output_index: state.reasoningOutputIndex,
+          summary_index: 0,
+          part: { type: 'summary_text', text: state.reasoningText }
+        })
+      )
+      chunks.push(
+        this._sse('response.output_item.done', {
+          type: 'response.output_item.done',
+          output_index: state.reasoningOutputIndex,
+          item: reasoningItem
+        })
+      )
+    }
+
     if (state.messageStarted) {
       const messageItem = {
         id: state.messageItemId,
@@ -390,7 +477,7 @@ class OpenAIResponsesAdapters {
         this._sse('response.output_text.done', {
           type: 'response.output_text.done',
           item_id: state.messageItemId,
-          output_index: 0,
+          output_index: state.messageOutputIndex,
           content_index: 0,
           text: state.text
         })
@@ -399,7 +486,7 @@ class OpenAIResponsesAdapters {
         this._sse('response.content_part.done', {
           type: 'response.content_part.done',
           item_id: state.messageItemId,
-          output_index: 0,
+          output_index: state.messageOutputIndex,
           content_index: 0,
           part: { type: 'output_text', text: state.text, annotations: [] }
         })
@@ -407,7 +494,7 @@ class OpenAIResponsesAdapters {
       chunks.push(
         this._sse('response.output_item.done', {
           type: 'response.output_item.done',
-          output_index: 0,
+          output_index: state.messageOutputIndex,
           item: messageItem
         })
       )
@@ -416,12 +503,13 @@ class OpenAIResponsesAdapters {
     for (const [index, toolCall] of state.toolCalls.entries()) {
       const item = this._buildStreamingToolItem(toolCall, state.adapterContext)
       output.push(item)
+      const outputIndex = Number.isInteger(toolCall.outputIndex) ? toolCall.outputIndex : index
       if (item.type === 'custom_tool_call') {
         chunks.push(
           this._sse('response.custom_tool_call_input.done', {
             type: 'response.custom_tool_call_input.done',
             item_id: toolCall.id,
-            output_index: index,
+            output_index: outputIndex,
             input: item.input || ''
           })
         )
@@ -430,7 +518,7 @@ class OpenAIResponsesAdapters {
           this._sse('response.function_call_arguments.done', {
             type: 'response.function_call_arguments.done',
             item_id: toolCall.id,
-            output_index: index,
+            output_index: outputIndex,
             arguments: toolCall.arguments || '{}'
           })
         )
@@ -438,7 +526,7 @@ class OpenAIResponsesAdapters {
       chunks.push(
         this._sse('response.output_item.done', {
           type: 'response.output_item.done',
-          output_index: index,
+          output_index: outputIndex,
           item
         })
       )
@@ -777,16 +865,45 @@ class OpenAIResponsesAdapters {
     ]
   }
 
+  _ensureReasoningOutput(state) {
+    if (state.reasoningStarted) {
+      return []
+    }
+    state.reasoningStarted = true
+    state.reasoningItemId = state.reasoningItemId || this._makeId('rs')
+    state.reasoningOutputIndex = this._nextOutputIndex(state)
+    return [
+      this._sse('response.output_item.added', {
+        type: 'response.output_item.added',
+        output_index: state.reasoningOutputIndex,
+        item: {
+          id: state.reasoningItemId,
+          type: 'reasoning',
+          status: 'in_progress',
+          summary: []
+        }
+      }),
+      this._sse('response.reasoning_summary_part.added', {
+        type: 'response.reasoning_summary_part.added',
+        item_id: state.reasoningItemId,
+        output_index: state.reasoningOutputIndex,
+        summary_index: 0,
+        part: { type: 'summary_text', text: '' }
+      })
+    ]
+  }
+
   _ensureMessageOutput(state) {
     if (state.messageStarted) {
       return []
     }
     state.messageStarted = true
     state.messageItemId = state.messageItemId || this._makeId('msg')
+    state.messageOutputIndex = this._nextOutputIndex(state)
     return [
       this._sse('response.output_item.added', {
         type: 'response.output_item.added',
-        output_index: 0,
+        output_index: state.messageOutputIndex,
         item: {
           id: state.messageItemId,
           type: 'message',
@@ -798,7 +915,7 @@ class OpenAIResponsesAdapters {
       this._sse('response.content_part.added', {
         type: 'response.content_part.added',
         item_id: state.messageItemId,
-        output_index: 0,
+        output_index: state.messageOutputIndex,
         content_index: 0,
         part: { type: 'output_text', text: '', annotations: [] }
       })
@@ -857,6 +974,44 @@ class OpenAIResponsesAdapters {
       return value.text || value.content || JSON.stringify(value)
     }
     return String(value)
+  }
+
+  _extractReasoningText(value = {}) {
+    if (!value || typeof value !== 'object') {
+      return ''
+    }
+    let candidate = value.reasoning_content ?? value.reasoning_summary ?? value.reasoning?.summary
+    if (candidate === undefined && value.reasoning && typeof value.reasoning === 'object') {
+      candidate = value.reasoning.content ?? value.reasoning.text
+    } else if (candidate === undefined && typeof value.reasoning === 'string') {
+      candidate = value.reasoning
+    }
+    if (candidate === undefined || candidate === null) {
+      return ''
+    }
+    return this._extractText(candidate)
+  }
+
+  _buildReasoningResponseItem({ id = null, text = '', encryptedContent = '' } = {}) {
+    const item = {
+      id: id || this._makeId('rs'),
+      type: 'reasoning',
+      status: 'completed',
+      summary: []
+    }
+    if (text) {
+      item.summary.push({ type: 'summary_text', text })
+    }
+    if (encryptedContent) {
+      item.encrypted_content = encryptedContent
+    }
+    return item
+  }
+
+  _nextOutputIndex(state) {
+    const next = Number.isInteger(state.outputIndexCounter) ? state.outputIndexCounter : 0
+    state.outputIndexCounter = next + 1
+    return next
   }
 
   _copyIfPresent(from, to, field, targetField = field) {

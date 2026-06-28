@@ -114,12 +114,44 @@ function containsReasoningPayload(body = {}) {
   if (hasValue(body.reasoning) || hasValue(body.reasoning_effort)) {
     return true
   }
+  if (hasValue(body.thinking)) {
+    if (typeof body.thinking === 'object') {
+      const thinkingType = String(body.thinking.type || '').toLowerCase()
+      return thinkingType !== 'disabled' && thinkingType !== 'none' && thinkingType !== 'off'
+    }
+    return String(body.thinking).toLowerCase() !== 'disabled'
+  }
+  if (hasValue(body.output_config?.effort)) {
+    return true
+  }
   if (Array.isArray(body.include)) {
     return body.include.some(
       (item) => typeof item === 'string' && item.toLowerCase().includes('reasoning')
     )
   }
   return false
+}
+
+function mergeRequestFeatures(primary = {}, secondary = {}, overrides = {}) {
+  return {
+    ...primary,
+    ...secondary,
+    endpointKind: overrides.endpointKind || primary.endpointKind || secondary.endpointKind,
+    hasTools: primary.hasTools === true || secondary.hasTools === true,
+    hasImages: primary.hasImages === true || secondary.hasImages === true,
+    hasReasoning: primary.hasReasoning === true || secondary.hasReasoning === true,
+    hasImageGeneration:
+      primary.hasImageGeneration === true || secondary.hasImageGeneration === true,
+    openaiResponsesOnly:
+      primary.openaiResponsesOnly === true || secondary.openaiResponsesOnly === true,
+    allowOpenAITokenForAnthropicImages:
+      primary.allowOpenAITokenForAnthropicImages === true ||
+      secondary.allowOpenAITokenForAnthropicImages === true,
+    allowOpenAITokenForOpenAICompatibleImages:
+      primary.allowOpenAITokenForOpenAICompatibleImages === true ||
+      secondary.allowOpenAITokenForOpenAICompatibleImages === true,
+    ...overrides
+  }
 }
 
 function containsImageGenerationTool(body = {}) {
@@ -293,6 +325,7 @@ module.exports = {
   getRequestFeaturesFromBody,
   getRequestFeaturesForImages,
   containsImageGenerationTool,
+  mergeRequestFeatures,
   normalizeStringArray,
   getOpenAIResponsesModelRank,
   getOpenAIImageModelRank,

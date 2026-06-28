@@ -160,6 +160,42 @@ describe('openaiResponsesRelayService usage accounting', () => {
     expect(res.status).toHaveBeenCalledWith(200)
   })
 
+  test('adds Anthropic beta headers for passthrough Messages thinking requests', () => {
+    const headers = openaiResponsesRelayService._buildUpstreamHeaders(
+      {
+        headers: {
+          'anthropic-beta': 'client-beta',
+          'user-agent': 'claude-code-test'
+        }
+      },
+      {
+        id: 'acct-1',
+        apiKey: 'secret',
+        customHeaders: { 'Anthropic-Beta': 'custom-beta' }
+      },
+      {
+        providerEndpoint: 'passthrough',
+        targetPath: '/v1/messages',
+        body: {
+          model: 'glm-5.2',
+          thinking: { type: 'enabled', budget_tokens: 4096 }
+        }
+      }
+    )
+
+    expect(headers['anthropic-beta'].split(',')).toEqual([
+      'claude-code-20250219',
+      'oauth-2025-04-20',
+      'interleaved-thinking-2025-05-14',
+      'fine-grained-tool-streaming-2025-05-14',
+      'client-beta',
+      'custom-beta'
+    ])
+    expect(headers['Anthropic-Beta']).toBeUndefined()
+    expect(headers.Authorization).toBe('Bearer secret')
+    expect(headers['User-Agent']).toBe('claude-code-test')
+  })
+
   test('uses recorded costs for rate-limit cost counters and account quota', async () => {
     extractOpenAICacheReadTokens.mockReturnValue(3)
     updateRateLimitCounters.mockResolvedValue({ totalTokens: 17, ratedCost: 0.002 })

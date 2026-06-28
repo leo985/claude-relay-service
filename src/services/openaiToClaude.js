@@ -355,11 +355,17 @@ class OpenAIToClaudeConverter {
       } else if (Array.isArray(claudeResponse.content)) {
         // 提取文本内容和工具调用
         const textParts = []
+        const thinkingParts = []
         const toolCalls = []
 
         for (const item of claudeResponse.content) {
           if (item.type === 'text') {
             textParts.push(item.text)
+          } else if (item.type === 'thinking') {
+            const thinkingText = item.thinking || item.text || ''
+            if (thinkingText) {
+              thinkingParts.push(thinkingText)
+            }
           } else if (item.type === 'tool_use') {
             toolCalls.push({
               id: item.id,
@@ -373,6 +379,9 @@ class OpenAIToClaudeConverter {
         }
 
         message.content = textParts.join('') || null
+        if (thinkingParts.length > 0) {
+          message.reasoning_content = thinkingParts.join('')
+        }
         if (toolCalls.length > 0) {
           message.tool_calls = toolCalls
         }
@@ -431,6 +440,11 @@ class OpenAIToClaudeConverter {
     } else if (event.type === 'content_block_start' && event.content_block) {
       if (event.content_block.type === 'text') {
         baseChunk.choices[0].delta.content = event.content_block.text || ''
+      } else if (event.content_block.type === 'thinking') {
+        if (event.content_block.thinking || event.content_block.text) {
+          baseChunk.choices[0].delta.reasoning_content =
+            event.content_block.thinking || event.content_block.text || ''
+        }
       } else if (event.content_block.type === 'tool_use') {
         // 开始工具调用
         baseChunk.choices[0].delta.tool_calls = [
@@ -448,6 +462,10 @@ class OpenAIToClaudeConverter {
     } else if (event.type === 'content_block_delta' && event.delta) {
       if (event.delta.type === 'text_delta') {
         baseChunk.choices[0].delta.content = event.delta.text || ''
+      } else if (event.delta.type === 'thinking_delta') {
+        baseChunk.choices[0].delta.reasoning_content = event.delta.thinking || ''
+      } else if (event.delta.type === 'signature_delta') {
+        return null
       } else if (event.delta.type === 'input_json_delta') {
         // 工具调用参数的增量更新
         baseChunk.choices[0].delta.tool_calls = [
@@ -474,7 +492,16 @@ class OpenAIToClaudeConverter {
       return null
     }
 
-    return baseChunk
+    return this._hasOpenAIChunkPayload(baseChunk) ? baseChunk : null
+  }
+
+  _hasOpenAIChunkPayload(chunk) {
+    const choice = chunk?.choices?.[0] || {}
+    return (
+      Object.keys(choice.delta || {}).length > 0 ||
+      choice.finish_reason !== null ||
+      chunk.usage !== undefined
+    )
   }
 
   /**

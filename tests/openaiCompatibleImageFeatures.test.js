@@ -5,7 +5,8 @@ const {
   getOpenAIImageModelRank,
   getOpenAIResponsesModelRank,
   getRequestFeaturesFromBody,
-  getRequestFeaturesForImages
+  getRequestFeaturesForImages,
+  mergeRequestFeatures
 } = require('../src/utils/openaiCompatible')
 
 describe('openaiCompatible image features', () => {
@@ -76,6 +77,45 @@ describe('openaiCompatible image features', () => {
         features
       )
     ).toEqual({ ok: false, reason: 'images_not_supported' })
+  })
+
+  test('detects Anthropic thinking as a reasoning feature', () => {
+    const features = getRequestFeaturesFromBody(
+      {
+        model: 'GLM-5.2',
+        thinking: { type: 'enabled', budget_tokens: 4096 },
+        messages: [{ role: 'user', content: 'hello' }]
+      },
+      'passthrough'
+    )
+
+    expect(features.hasReasoning).toBe(true)
+    expect(
+      accountSupportsRequestFeatures(
+        { providerEndpoint: 'passthrough', supportsReasoning: false },
+        features
+      )
+    ).toEqual({ ok: false, reason: 'reasoning_not_supported' })
+  })
+
+  test('merges converted Responses reasoning back onto original Chat features', () => {
+    const originalFeatures = getRequestFeaturesFromBody(
+      { model: 'glm-5.2', messages: [{ role: 'user', content: 'hello' }] },
+      'chat_completions'
+    )
+    const convertedFeatures = getRequestFeaturesFromBody(
+      { model: 'glm-5.2', input: 'hello', reasoning: { effort: 'xhigh' } },
+      'responses'
+    )
+
+    expect(
+      mergeRequestFeatures(originalFeatures, convertedFeatures, {
+        endpointKind: 'chat_completions'
+      })
+    ).toMatchObject({
+      endpointKind: 'chat_completions',
+      hasReasoning: true
+    })
   })
 
   test('builds explicit features for Images API requests', () => {

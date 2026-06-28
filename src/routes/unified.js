@@ -16,7 +16,8 @@ const CodexToOpenAIConverter = require('../services/codexToOpenAI')
 const {
   clonePlainObject,
   getRequestFeaturesFromBody,
-  isOpenAINamespace
+  isOpenAINamespace,
+  mergeRequestFeatures
 } = require('../utils/openaiCompatible')
 
 const router = express.Router()
@@ -107,6 +108,12 @@ async function routeToBackend(req, res, requestedModel) {
 
     const codexConverter = new CodexToOpenAIConverter()
     req.body = codexConverter.buildRequestFromOpenAI(req.body)
+    const convertedRequestFeatures = getRequestFeaturesFromBody(req.body || {}, 'responses')
+    req._openaiCompatibleRequestFeatures = mergeRequestFeatures(
+      requestFeatures,
+      convertedRequestFeatures,
+      { endpointKind: requestFeatures.endpointKind || 'chat_completions' }
+    )
     req.body.instructions = CODEX_CLI_INSTRUCTIONS
     req._fromUnifiedEndpoint = true
     req._forceOpenAICompatibleRelay = true

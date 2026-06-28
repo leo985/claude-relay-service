@@ -28,7 +28,8 @@ const {
   clonePlainObject,
   detectEndpointKindFromPath,
   getRequestFeaturesForImages,
-  getRequestFeaturesFromBody
+  getRequestFeaturesFromBody,
+  mergeRequestFeatures
 } = require('../utils/openaiCompatible')
 
 // Codex CLI 系统提示词（非 Codex CLI 客户端请求时注入，统一端点也使用）
@@ -487,7 +488,20 @@ const handleResponses = async (req, res) => {
       req._openaiCompatibleOriginal?.endpointKind === 'chat_completions'
         ? req._openaiCompatibleOriginal.body
         : req.body
-    const detectedRequestFeatures = getRequestFeaturesFromBody(featureBody || {}, endpointKind)
+    const originalRequestFeatures = getRequestFeaturesFromBody(featureBody || {}, endpointKind)
+    const currentBodyEndpointKind =
+      req._openaiCompatibleOriginal?.endpointKind === 'chat_completions'
+        ? 'responses'
+        : endpointKind
+    const currentBodyRequestFeatures = getRequestFeaturesFromBody(
+      req.body || {},
+      currentBodyEndpointKind
+    )
+    const detectedRequestFeatures = mergeRequestFeatures(
+      originalRequestFeatures,
+      currentBodyRequestFeatures,
+      { endpointKind }
+    )
     const requestFeatures = {
       ...detectedRequestFeatures,
       endpointKind,

@@ -1,5 +1,10 @@
 const OpenAIResponsesAdapters = require('../src/services/openaiResponsesAdapters')
 
+function parseSSEPayload(chunk) {
+  const dataLine = chunk.split('\n').find((line) => line.startsWith('data:'))
+  return JSON.parse(dataLine.slice(5).trim())
+}
+
 describe('OpenAIResponsesAdapters', () => {
   let adapters
 
@@ -251,6 +256,67 @@ describe('OpenAIResponsesAdapters', () => {
     })
   })
 
+  test('preserves Chat Completions reasoning_content in Responses payloads', () => {
+    const result = adapters.convertChatCompletionToResponse(
+      {
+        id: 'chatcmpl-1',
+        created: 123,
+        model: 'glm-5.2',
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              reasoning_content: 'think first',
+              content: 'final answer'
+            },
+            finish_reason: 'stop'
+          }
+        ]
+      },
+      'gpt-5.5'
+    )
+
+    expect(result.output[0]).toMatchObject({
+      type: 'reasoning',
+      summary: [{ type: 'summary_text', text: 'think first' }]
+    })
+    expect(result.output[1]).toMatchObject({
+      type: 'message',
+      content: [{ type: 'output_text', text: 'final answer', annotations: [] }]
+    })
+  })
+
+  test('streams Chat reasoning_content as Responses reasoning summary deltas', () => {
+    const state = adapters.createChatToResponsesStreamState()
+
+    const chunks = adapters.convertChatStreamChunkToResponses(
+      {
+        id: 'chatcmpl-1',
+        created: 123,
+        model: 'glm-5.2',
+        choices: [
+          {
+            delta: { reasoning_content: 'hidden thought' }
+          }
+        ]
+      },
+      'gpt-5.5',
+      state
+    )
+    const finalChunks = adapters.finalizeChatToResponsesStream('gpt-5.5', state)
+    const output = [...chunks, ...finalChunks].join('\n')
+    const completed = finalChunks.find((chunk) => chunk.includes('event: response.completed'))
+    const completedPayload = parseSSEPayload(completed)
+
+    expect(output).toContain('response.reasoning_summary_text.delta')
+    expect(output).toContain('"delta":"hidden thought"')
+    expect(output).toContain('response.reasoning_summary_text.done')
+    expect(completedPayload.response.output[0]).toMatchObject({
+      type: 'reasoning',
+      summary: [{ type: 'summary_text', text: 'hidden thought' }]
+    })
+  })
+
   test('converts Anthropic Messages responses to Responses payloads', () => {
     const result = adapters.convertClaudeMessageToResponse(
       {
@@ -275,6 +341,32 @@ describe('OpenAIResponsesAdapters', () => {
         }
       ],
       usage: { input_tokens: 4, output_tokens: 6, total_tokens: 10 }
+    })
+  })
+
+  test('preserves Anthropic thinking blocks in Responses payloads', () => {
+    const result = adapters.convertClaudeMessageToResponse(
+      {
+        id: 'msg_1',
+        model: 'glm-5.2',
+        content: [
+          { type: 'thinking', thinking: 'private thought' },
+          { type: 'redacted_thinking', data: 'sealed' },
+          { type: 'text', text: 'hello' }
+        ],
+        stop_reason: 'end_turn'
+      },
+      'gpt-5.5'
+    )
+
+    expect(result.output[0]).toMatchObject({
+      type: 'reasoning',
+      encrypted_content: 'sealed',
+      summary: [{ type: 'summary_text', text: 'private thought' }]
+    })
+    expect(result.output[1]).toMatchObject({
+      type: 'message',
+      content: [{ type: 'output_text', text: 'hello', annotations: [] }]
     })
   })
 })

@@ -102,6 +102,11 @@ const RETRYABLE_NETWORK_ERROR_CODES = new Set([
   'ENOTFOUND'
 ])
 
+const ANTHROPIC_OAUTH_BETA = 'oauth-2025-04-20'
+const ANTHROPIC_CLAUDE_CODE_BETA = 'claude-code-20250219'
+const ANTHROPIC_INTERLEAVED_THINKING_BETA = 'interleaved-thinking-2025-05-14'
+const ANTHROPIC_TOOL_STREAMING_BETA = 'fine-grained-tool-streaming-2025-05-14'
+
 class OpenAIResponsesRelayService {
   constructor() {
     this.defaultTimeout = config.requestTimeout || 600000
@@ -534,7 +539,7 @@ class OpenAIResponsesRelayService {
     body[field] = Math.max(0, Math.min(Math.floor(parsed), limit))
   }
 
-  _buildUpstreamHeaders(req, fullAccount) {
+  _buildUpstreamHeaders(req, fullAccount, upstreamRequest = {}) {
     const headers = {
       ...filterForOpenAI(req.headers),
       Authorization: `Bearer ${fullAccount.apiKey}`,
@@ -565,7 +570,83 @@ class OpenAIResponsesRelayService {
       })
     }
 
+    if (this._shouldApplyAnthropicThinkingBeta(upstreamRequest)) {
+      const existingBetaValues = []
+      for (const key of Object.keys(headers)) {
+        if (key.toLowerCase() === 'anthropic-beta') {
+          existingBetaValues.push(headers[key])
+          delete headers[key]
+        }
+      }
+      headers['anthropic-beta'] = this._mergeAnthropicBetaHeader(
+        this._getDefaultAnthropicBetas(upstreamRequest.body?.model),
+        existingBetaValues.join(',')
+      )
+      logger.info('🧠 Applied Anthropic thinking beta header for passthrough Messages request', {
+        accountId: fullAccount.id,
+        betaHeader: headers['anthropic-beta']
+      })
+    }
+
     return headers
+  }
+
+  _shouldApplyAnthropicThinkingBeta(upstreamRequest = {}) {
+    if (
+      normalizeProviderEndpoint(upstreamRequest.providerEndpoint || 'responses') !== 'passthrough'
+    ) {
+      return false
+    }
+
+    const targetPath = String(upstreamRequest.targetPath || '').split('?')[0]
+    if (!targetPath.endsWith('/v1/messages')) {
+      return false
+    }
+
+    return this._hasEnabledAnthropicThinking(upstreamRequest.body)
+  }
+
+  _hasEnabledAnthropicThinking(body = {}) {
+    if (!body || typeof body !== 'object' || !body.thinking) {
+      return false
+    }
+    if (typeof body.thinking === 'object') {
+      const thinkingType = String(body.thinking.type || '').toLowerCase()
+      return thinkingType !== 'disabled' && thinkingType !== 'none' && thinkingType !== 'off'
+    }
+    return String(body.thinking).toLowerCase() !== 'disabled'
+  }
+
+  _getDefaultAnthropicBetas(modelId) {
+    const isHaikuModel = modelId && String(modelId).toLowerCase().includes('haiku')
+    return isHaikuModel
+      ? [ANTHROPIC_OAUTH_BETA, ANTHROPIC_INTERLEAVED_THINKING_BETA]
+      : [
+          ANTHROPIC_CLAUDE_CODE_BETA,
+          ANTHROPIC_OAUTH_BETA,
+          ANTHROPIC_INTERLEAVED_THINKING_BETA,
+          ANTHROPIC_TOOL_STREAMING_BETA
+        ]
+  }
+
+  _mergeAnthropicBetaHeader(defaultBetas = [], existingBetaHeader = '') {
+    const betaList = []
+    const seen = new Set()
+    const addBeta = (beta) => {
+      const normalized = String(beta || '').trim()
+      if (!normalized || seen.has(normalized)) {
+        return
+      }
+      seen.add(normalized)
+      betaList.push(normalized)
+    }
+
+    defaultBetas.forEach(addBeta)
+    String(existingBetaHeader || '')
+      .split(',')
+      .forEach(addBeta)
+
+    return betaList.join(',')
   }
 
   // 处理请求转发
@@ -620,7 +701,7 @@ class OpenAIResponsesRelayService {
       const targetUrl = this._buildTargetUrl(fullAccount.baseApi, upstreamRequest.targetPath)
       logger.info(`🎯 Forwarding to: ${targetUrl}`)
 
-      const headers = this._buildUpstreamHeaders(req, fullAccount)
+      const headers = this._buildUpstreamHeaders(req, fullAccount, upstreamRequest)
       const isStream = upstreamRequest.body?.stream === true
 
       // 配置请求选项
