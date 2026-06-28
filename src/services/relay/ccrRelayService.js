@@ -6,6 +6,7 @@ const { parseVendorPrefixedModel } = require('../../utils/modelHelper')
 const userMessageQueueService = require('../userMessageQueueService')
 const { isStreamWritable } = require('../../utils/streamHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const { normalizeUsage, toAnthropicUsageObject } = require('../../utils/usageNormalizer')
 
 class CcrRelayService {
   constructor() {
@@ -885,7 +886,7 @@ class CcrRelayService {
                   // 解析 SSE 数据并收集使用统计
                   const usageData = this._parseSSELineForUsage(line)
                   if (usageData) {
-                    Object.assign(collectedUsage, usageData)
+                    this._mergeUsageSnapshot(collectedUsage, usageData)
                   }
 
                   // 应用流转换器（如果提供）
@@ -989,43 +990,83 @@ class CcrRelayService {
   }
 
   // 📊 解析SSE行以提取使用统计信息
+  _normalizeUsageForAccounting(usage, model = null) {
+    const normalized = normalizeUsage('ccr', usage, { inputIncludesCacheRead: false })
+    const usageObject = toAnthropicUsageObject(normalized, {})
+    if (model) {
+      usageObject.model = model
+    }
+    return usageObject
+  }
+
+  _mergeUsageSnapshot(target, source) {
+    if (!target || !source) {
+      return target
+    }
+
+    for (const field of [
+      'input_tokens',
+      'output_tokens',
+      'cache_creation_input_tokens',
+      'cache_read_input_tokens'
+    ]) {
+      const value = source[field]
+      if (value === undefined || value === null) {
+        continue
+      }
+      if (target[field] === undefined || Number(value) > 0) {
+        target[field] = value
+      }
+    }
+
+    if (source.cache_creation && typeof source.cache_creation === 'object') {
+      target.cache_creation = target.cache_creation || {}
+      for (const field of ['ephemeral_5m_input_tokens', 'ephemeral_1h_input_tokens']) {
+        const value = source.cache_creation[field]
+        if (value === undefined || value === null) {
+          continue
+        }
+        if (target.cache_creation[field] === undefined || Number(value) > 0) {
+          target.cache_creation[field] = value
+        }
+      }
+    }
+
+    if (source.model) {
+      target.model = source.model
+    }
+
+    return target
+  }
+
   _parseSSELineForUsage(line) {
     try {
-      if (line.startsWith('data: ')) {
-        const data = line.substring(6).trim()
+      if (line.startsWith('data:')) {
+        const data = line.slice(5).trim()
         if (data === '[DONE]') {
           return null
         }
 
         const jsonData = JSON.parse(data)
 
+        // Anthropic stream: message_start carries input/cache usage.
+        if (jsonData.type === 'message_start' && jsonData.message && jsonData.message.usage) {
+          return this._normalizeUsageForAccounting(jsonData.message.usage, jsonData.message.model)
+        }
+
+        // Anthropic stream: message_delta carries final output usage.
+        if (jsonData.type === 'message_delta' && jsonData.usage) {
+          return this._normalizeUsageForAccounting(jsonData.usage, jsonData.model)
+        }
+
         // 检查是否包含使用统计信息
         if (jsonData.usage) {
-          return {
-            input_tokens: jsonData.usage.input_tokens || 0,
-            output_tokens: jsonData.usage.output_tokens || 0,
-            cache_creation_input_tokens: jsonData.usage.cache_creation_input_tokens || 0,
-            cache_read_input_tokens: jsonData.usage.cache_read_input_tokens || 0,
-            // 支持 ephemeral cache 字段
-            cache_creation_input_tokens_ephemeral_5m:
-              jsonData.usage.cache_creation_input_tokens_ephemeral_5m || 0,
-            cache_creation_input_tokens_ephemeral_1h:
-              jsonData.usage.cache_creation_input_tokens_ephemeral_1h || 0
-          }
+          return this._normalizeUsageForAccounting(jsonData.usage, jsonData.model)
         }
 
         // 检查 message_delta 事件中的使用统计
         if (jsonData.type === 'message_delta' && jsonData.delta && jsonData.delta.usage) {
-          return {
-            input_tokens: jsonData.delta.usage.input_tokens || 0,
-            output_tokens: jsonData.delta.usage.output_tokens || 0,
-            cache_creation_input_tokens: jsonData.delta.usage.cache_creation_input_tokens || 0,
-            cache_read_input_tokens: jsonData.delta.usage.cache_read_input_tokens || 0,
-            cache_creation_input_tokens_ephemeral_5m:
-              jsonData.delta.usage.cache_creation_input_tokens_ephemeral_5m || 0,
-            cache_creation_input_tokens_ephemeral_1h:
-              jsonData.delta.usage.cache_creation_input_tokens_ephemeral_1h || 0
-          }
+          return this._normalizeUsageForAccounting(jsonData.delta.usage, jsonData.model)
         }
       }
     } catch (err) {

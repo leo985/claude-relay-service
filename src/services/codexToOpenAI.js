@@ -50,6 +50,14 @@ class CodexToOpenAIConverter {
         // done 事件仅为结束信号，delta 已通过 .delta 事件发送，不再注入内容
         return []
 
+      case 'response.reasoning_text.delta':
+        // 上游返回的原始思维链增量，同样映射为 reasoning_content
+        return this._emitChunk(state, model, { reasoning_content: eventData.delta })
+
+      case 'response.reasoning_text.done':
+        // done 事件仅为结束信号，原始思维链已通过 .delta 事件发送
+        return []
+
       case 'response.output_text.delta':
         return this._emitChunk(state, model, { content: eventData.delta })
 

@@ -7,6 +7,7 @@ const serviceRatesService = require('./serviceRatesService')
 const requestDetailService = require('./requestDetailService')
 const { isClaudeFamilyModel } = require('../utils/modelHelper')
 const { finalizeRequestDetailMeta } = require('../utils/requestDetailHelper')
+const { normalizeUsage, toAnthropicUsageObject } = require('../utils/usageNormalizer')
 const requestBodyRuleService = require('./requestBodyRuleService')
 
 const ACCOUNT_TYPE_CONFIG = {
@@ -1669,6 +1670,17 @@ class ApiKeyService {
   ) {
     try {
       const finalizedRequestMeta = finalizeRequestDetailMeta(requestMeta)
+      const normalizedUsage = normalizeUsage(
+        accountType || 'generic',
+        {
+          input_tokens: inputTokens,
+          output_tokens: outputTokens,
+          cache_creation_input_tokens: cacheCreateTokens,
+          cache_read_input_tokens: cacheReadTokens
+        },
+        { inputIncludesCacheRead: false }
+      )
+      ;({ inputTokens, outputTokens, cacheCreateTokens, cacheReadTokens } = normalizedUsage)
       const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
 
       // 计算费用
@@ -2012,11 +2024,16 @@ class ApiKeyService {
   ) {
     try {
       const finalizedRequestMeta = finalizeRequestDetailMeta(requestMeta)
+      const normalizedUsage = normalizeUsage(accountType || 'generic', usageObject, {
+        inputIncludesCacheRead: false
+      })
+      const normalizedUsageObject = toAnthropicUsageObject(normalizedUsage, usageObject)
+
       // 提取 token 数量
-      const inputTokens = usageObject.input_tokens || 0
-      const outputTokens = usageObject.output_tokens || 0
-      const cacheCreateTokens = usageObject.cache_creation_input_tokens || 0
-      const cacheReadTokens = usageObject.cache_read_input_tokens || 0
+      const { inputTokens } = normalizedUsage
+      const { outputTokens } = normalizedUsage
+      const { cacheCreateTokens } = normalizedUsage
+      const { cacheReadTokens } = normalizedUsage
 
       const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
 
@@ -2035,7 +2052,7 @@ class ApiKeyService {
       }
       try {
         const CostCalculator = require('../utils/costCalculator')
-        const calculatedCost = CostCalculator.calculateCost(usageObject, model)
+        const calculatedCost = CostCalculator.calculateCost(normalizedUsageObject, model)
         const costs = calculatedCost?.costs || {}
         const totalCost = Number(costs.total ?? calculatedCost?.totalCost ?? 0)
 
@@ -2063,17 +2080,12 @@ class ApiKeyService {
         }
       } catch (pricingError) {
         logger.error(`❌ Failed to calculate cost for model ${model}:`, pricingError)
-        logger.error(`   Usage object:`, JSON.stringify(usageObject))
+        logger.error(`   Usage object:`, JSON.stringify(normalizedUsageObject))
       }
 
       // 提取详细的缓存创建数据
-      let ephemeral5mTokens = 0
-      let ephemeral1hTokens = 0
-
-      if (usageObject.cache_creation && typeof usageObject.cache_creation === 'object') {
-        ephemeral5mTokens = usageObject.cache_creation.ephemeral_5m_input_tokens || 0
-        ephemeral1hTokens = usageObject.cache_creation.ephemeral_1h_input_tokens || 0
-      }
+      const { ephemeral5mTokens } = normalizedUsage
+      const { ephemeral1hTokens } = normalizedUsage
 
       // 计算费用（应用服务倍率）- 需要在 incrementTokenUsage 之前计算
       const realCostWithDetails = costInfo.totalCost || 0
@@ -2229,9 +2241,9 @@ class ApiKeyService {
         logParts.push(`Cache Create: ${cacheCreateTokens}`)
 
         // 如果有详细的缓存创建数据，也记录它们
-        if (usageObject.cache_creation) {
+        if (normalizedUsageObject.cache_creation) {
           const { ephemeral_5m_input_tokens, ephemeral_1h_input_tokens } =
-            usageObject.cache_creation
+            normalizedUsageObject.cache_creation
           if (ephemeral_5m_input_tokens > 0) {
             logParts.push(`5m: ${ephemeral_5m_input_tokens}`)
           }

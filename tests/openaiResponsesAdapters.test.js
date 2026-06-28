@@ -224,6 +224,59 @@ describe('OpenAIResponsesAdapters', () => {
     })
   })
 
+  test('enables Anthropic thinking when Responses client requests reasoning summary without effort', () => {
+    const result = adapters.buildAnthropicMessagesRequestFromResponses({
+      model: 'glm-5.2',
+      input: 'say hi',
+      reasoning: { summary: 'auto' },
+      max_output_tokens: 4096,
+      stream: true
+    })
+
+    expect(result.thinking).toBeDefined()
+    expect(result.thinking.type).toBe('enabled')
+    expect(result.thinking.budget_tokens).toBeGreaterThan(0)
+    expect(result.thinking.budget_tokens).toBeLessThan(result.max_tokens)
+  })
+
+  test('enables Anthropic thinking when Responses client requests reasoning via include array', () => {
+    const result = adapters.buildAnthropicMessagesRequestFromResponses({
+      model: 'glm-5.2',
+      input: 'say hi',
+      include: ['reasoning.encrypted_content'],
+      max_output_tokens: 8192,
+      stream: true
+    })
+
+    expect(result.thinking).toBeDefined()
+    expect(result.thinking.type).toBe('enabled')
+  })
+
+  test('preserves explicit reasoning effort when enabling Anthropic thinking', () => {
+    const result = adapters.buildAnthropicMessagesRequestFromResponses({
+      model: 'glm-5.2',
+      input: 'say hi',
+      reasoning: { effort: 'low', summary: 'auto' },
+      max_output_tokens: 4096,
+      stream: true
+    })
+
+    expect(result.thinking).toBeDefined()
+    expect(result.thinking.budget_tokens).toBe(1024)
+  })
+
+  test('does not enable Anthropic thinking when reasoning is explicitly disabled', () => {
+    const result = adapters.buildAnthropicMessagesRequestFromResponses({
+      model: 'glm-5.2',
+      input: 'say hi',
+      reasoning: { effort: 'low', summary: 'none' },
+      max_output_tokens: 4096,
+      stream: true
+    })
+
+    expect(result.thinking).toBeUndefined()
+  })
+
   test('converts Chat Completions responses to Responses payloads', () => {
     const result = adapters.convertChatCompletionToResponse(
       {

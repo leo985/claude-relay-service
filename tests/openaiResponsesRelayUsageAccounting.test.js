@@ -249,6 +249,56 @@ describe('openaiResponsesRelayService usage accounting', () => {
     expect(openaiResponsesAccountService.updateUsageQuota).toHaveBeenCalledWith('acct-1', 0.001)
   })
 
+  test('does not subtract Anthropic passthrough cache-read tokens from input usage', async () => {
+    const req = createReq({
+      _openaiCompatible: { providerEndpoint: 'passthrough', requestedModel: 'gpt-5.5' },
+      _openaiCompatibleResponseAdapter: 'claude_to_responses',
+      _openaiCompatibleUpstreamBody: { model: 'claude-sonnet-4-5' }
+    })
+    const res = createRes()
+    const account = { id: 'acct-1', dailyQuota: '0' }
+    const apiKeyData = { id: 'key-1' }
+    const usage = {
+      input_tokens: 100,
+      output_tokens: 40,
+      cache_read_input_tokens: 20
+    }
+
+    await openaiResponsesRelayService._handleNormalResponse(
+      {
+        status: 200,
+        data: {
+          id: 'msg-1',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'ok' }],
+          model: 'claude-sonnet-4-5',
+          stop_reason: 'end_turn',
+          usage
+        }
+      },
+      res,
+      account,
+      apiKeyData,
+      'claude-sonnet-4-5',
+      req
+    )
+
+    expect(apiKeyService.recordUsage).toHaveBeenCalledWith(
+      'key-1',
+      100,
+      40,
+      0,
+      20,
+      'claude-sonnet-4-5',
+      'acct-1',
+      'openai-responses',
+      'priority',
+      expect.objectContaining({ stream: false, statusCode: 200 })
+    )
+    expect(openaiResponsesAccountService.updateAccountUsage).toHaveBeenCalledWith('acct-1', 160)
+  })
+
   test('rewrites structured response model fields to requested alias without changing usage model', async () => {
     const req = createReq({
       body: { model: 'gpt-5.5' },

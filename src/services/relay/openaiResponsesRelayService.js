@@ -16,6 +16,7 @@ const {
   extractOpenAICacheReadTokens
 } = require('../../utils/requestDetailHelper')
 const { updateRateLimitCounters } = require('../../utils/rateLimitHelper')
+const { normalizeUsage } = require('../../utils/usageNormalizer')
 const {
   RESERVED_CUSTOM_HEADERS,
   clonePlainObject,
@@ -56,27 +57,51 @@ function extractCacheCreationTokens(usageData) {
   return 0
 }
 
-function toFiniteNumber(value, fallback = 0) {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : fallback
+function isAnthropicUsageContext({ providerEndpoint, responseAdapter } = {}) {
+  if (responseAdapter === 'claude_to_responses') {
+    return true
+  }
+  return (
+    getProviderProtocol(normalizeProviderEndpoint(providerEndpoint || 'responses')) ===
+    'passthrough'
+  )
 }
 
-function summarizeUsage(usageData = {}) {
-  const totalInputTokens = toFiniteNumber(usageData.input_tokens ?? usageData.prompt_tokens)
-  const outputTokens = toFiniteNumber(usageData.output_tokens ?? usageData.completion_tokens)
-  const cacheReadTokens = extractOpenAICacheReadTokens(usageData)
-  const cacheCreateTokens = extractCacheCreationTokens(usageData)
-  const actualInputTokens = Math.max(0, totalInputTokens - cacheReadTokens)
-  const totalTokens =
-    toFiniteNumber(usageData.total_tokens) || totalInputTokens + outputTokens + cacheCreateTokens
+function summarizeUsage(usageData = {}, context = {}) {
+  const usageForNormalization = { ...usageData }
+  const extractedCacheReadTokens = extractOpenAICacheReadTokens(usageData)
+  if (extractedCacheReadTokens > 0) {
+    usageForNormalization.cache_read_input_tokens = extractedCacheReadTokens
+  }
+  const extractedCacheCreateTokens = extractCacheCreationTokens(usageData)
+  if (extractedCacheCreateTokens > 0) {
+    usageForNormalization.cache_creation_input_tokens = extractedCacheCreateTokens
+  }
+
+  const inputIncludesCacheRead = !isAnthropicUsageContext(context)
+  const normalized = normalizeUsage(
+    inputIncludesCacheRead ? 'openai-responses' : 'anthropic',
+    usageForNormalization,
+    {
+      inputIncludesCacheRead
+    }
+  )
 
   return {
-    totalInputTokens,
-    inputTokens: actualInputTokens,
-    outputTokens,
-    cacheCreateTokens,
-    cacheReadTokens,
-    totalTokens
+    totalInputTokens: normalized.totalInputTokens,
+    inputTokens: normalized.inputTokens,
+    outputTokens: normalized.outputTokens,
+    cacheCreateTokens: normalized.cacheCreateTokens,
+    cacheReadTokens: normalized.cacheReadTokens,
+    totalTokens: normalized.totalTokens
+  }
+}
+
+function getUsageNormalizationContext(req = {}) {
+  return {
+    providerEndpoint:
+      req?._openaiCompatible?.providerEndpoint || req?._openaiCompatibleProviderEndpoint,
+    responseAdapter: req?._openaiCompatibleResponseAdapter
   }
 }
 
@@ -485,7 +510,9 @@ class OpenAIResponsesRelayService {
     fallbackReason = ''
   }) {
     const modelToRecord = actualModel || requestedModel || 'gpt-4'
-    const usageSummary = usageData ? summarizeUsage(usageData) : emptyUsageSummary()
+    const usageSummary = usageData
+      ? summarizeUsage(usageData, getUsageNormalizationContext(req))
+      : emptyUsageSummary()
     const serviceTier = req?._serviceTier || null
 
     const costs = (await apiKeyService.recordUsage(

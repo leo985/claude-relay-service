@@ -1708,7 +1708,22 @@ class RedisClient {
     const now = new Date()
     const daysSinceCreated = Math.max(1, Math.ceil((now - createdAt) / (1000 * 60 * 60 * 24)))
 
-    const totalTokens = parseInt(total.totalTokens) || 0
+    const getAllTokensForAverages = (data) => {
+      const allTokens = parseInt(data.totalAllTokens) || parseInt(data.allTokens) || 0
+      if (allTokens > 0) {
+        return allTokens
+      }
+      const inputTokens = parseInt(data.totalInputTokens) || parseInt(data.inputTokens) || 0
+      const outputTokens = parseInt(data.totalOutputTokens) || parseInt(data.outputTokens) || 0
+      const cacheCreateTokens =
+        parseInt(data.totalCacheCreateTokens) || parseInt(data.cacheCreateTokens) || 0
+      const cacheReadTokens =
+        parseInt(data.totalCacheReadTokens) || parseInt(data.cacheReadTokens) || 0
+      const separatedTotal = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
+      return separatedTotal || parseInt(data.totalTokens) || parseInt(data.tokens) || 0
+    }
+
+    const totalTokens = getAllTokensForAverages(total)
     const totalRequests = parseInt(total.totalRequests) || 0
 
     // 计算平均RPM (requests per minute) 和 TPM (tokens per minute)
@@ -2211,7 +2226,22 @@ class RedisClient {
     const now = new Date()
     const daysSinceCreated = Math.max(1, Math.ceil((now - createdAt) / (1000 * 60 * 60 * 24)))
 
-    const totalTokens = parseInt(total.totalTokens) || 0
+    const getAllTokensForAverages = (data) => {
+      const allTokens = parseInt(data.totalAllTokens) || parseInt(data.allTokens) || 0
+      if (allTokens > 0) {
+        return allTokens
+      }
+      const inputTokens = parseInt(data.totalInputTokens) || parseInt(data.inputTokens) || 0
+      const outputTokens = parseInt(data.totalOutputTokens) || parseInt(data.outputTokens) || 0
+      const cacheCreateTokens =
+        parseInt(data.totalCacheCreateTokens) || parseInt(data.cacheCreateTokens) || 0
+      const cacheReadTokens =
+        parseInt(data.totalCacheReadTokens) || parseInt(data.cacheReadTokens) || 0
+      const separatedTotal = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
+      return separatedTotal || parseInt(data.totalTokens) || parseInt(data.tokens) || 0
+    }
+
+    const totalTokens = getAllTokensForAverages(total)
     const totalRequests = parseInt(total.totalRequests) || 0
 
     // 计算平均RPM和TPM
@@ -2221,7 +2251,7 @@ class RedisClient {
 
     // 处理账户统计数据
     const handleAccountData = (data) => {
-      const tokens = parseInt(data.totalTokens) || parseInt(data.tokens) || 0
+      const coreTokens = parseInt(data.totalTokens) || parseInt(data.tokens) || 0
       const inputTokens = parseInt(data.totalInputTokens) || parseInt(data.inputTokens) || 0
       const outputTokens = parseInt(data.totalOutputTokens) || parseInt(data.outputTokens) || 0
       const requests = parseInt(data.totalRequests) || parseInt(data.requests) || 0
@@ -2232,10 +2262,10 @@ class RedisClient {
       const allTokens = parseInt(data.totalAllTokens) || parseInt(data.allTokens) || 0
 
       const actualAllTokens =
-        allTokens || inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
+        allTokens || inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens || coreTokens
 
       return {
-        tokens,
+        tokens: actualAllTokens,
         inputTokens,
         outputTokens,
         cacheCreateTokens,

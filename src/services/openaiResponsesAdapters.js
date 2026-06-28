@@ -1,4 +1,8 @@
 class OpenAIResponsesAdapters {
+  constructor() {
+    this._defaultReasoningEffort = 'medium'
+  }
+
   buildResponsesAdapterContext(responsesBody = {}) {
     const body = responsesBody && typeof responsesBody === 'object' ? responsesBody : {}
     const toolTypes = {}
@@ -141,17 +145,69 @@ class OpenAIResponsesAdapters {
     if (chatBody.tool_choice !== undefined) {
       result.tool_choice = this._chatToolChoiceToAnthropic(chatBody.tool_choice)
     }
-    if (chatBody.reasoning_effort && result.max_tokens > 1024) {
+
+    const reasoningEffort = this._resolveAnthropicThinkingEffort(responsesBody)
+    if (reasoningEffort && result.max_tokens > 1024) {
       result.thinking = {
         type: 'enabled',
         budget_tokens: Math.min(
-          this._reasoningEffortToBudget(chatBody.reasoning_effort),
+          this._reasoningEffortToBudget(reasoningEffort),
           result.max_tokens - 1
         )
       }
     }
 
     return result
+  }
+
+  /**
+   * 从 Responses 请求体中解析出 Anthropic thinking 应使用的 effort。
+   * 仅当客户端明确表达 reasoning 意图（effort / summary / include）且未显式禁用时返回 effort，
+   * 否则返回 null（不启用 thinking）。
+   */
+  _resolveAnthropicThinkingEffort(responsesBody = {}) {
+    if (!responsesBody || typeof responsesBody !== 'object') {
+      return null
+    }
+
+    const { reasoning } = responsesBody
+    if (reasoning !== undefined && reasoning !== null) {
+      if (typeof reasoning === 'object') {
+        const summary = String(reasoning.summary || '').toLowerCase()
+        if (summary === 'none' || summary === 'off' || summary === 'disabled') {
+          return null
+        }
+        const effort = reasoning.effort
+          ? String(reasoning.effort).toLowerCase()
+          : this._defaultReasoningEffort
+        return this._isValidReasoningEffort(effort) ? effort : this._defaultReasoningEffort
+      }
+      const effort = String(reasoning).toLowerCase()
+      if (effort === 'disabled' || effort === 'none' || effort === 'off') {
+        return null
+      }
+      return this._isValidReasoningEffort(effort) ? effort : this._defaultReasoningEffort
+    }
+
+    if (responsesBody.reasoning_effort) {
+      const effort = String(responsesBody.reasoning_effort).toLowerCase()
+      return this._isValidReasoningEffort(effort) ? effort : this._defaultReasoningEffort
+    }
+
+    if (Array.isArray(responsesBody.include)) {
+      const wantsReasoning = responsesBody.include.some(
+        (item) => typeof item === 'string' && item.toLowerCase().startsWith('reasoning')
+      )
+      if (wantsReasoning) {
+        return this._defaultReasoningEffort
+      }
+    }
+
+    return null
+  }
+
+  _isValidReasoningEffort(effort) {
+    return effort === 'low' || effort === 'medium' || effort === 'high'
   }
 
   convertChatCompletionToResponse(chatResponse = {}, requestedModel = null, context = {}) {

@@ -101,3 +101,41 @@ describe('CodexToOpenAIConverter error sanitization', () => {
     })
   })
 })
+
+describe('CodexToOpenAIConverter reasoning forwarding', () => {
+  test('forwards reasoning_summary_text.delta as reasoning_content', () => {
+    const converter = new CodexToOpenAIConverter()
+    const chunks = converter.convertStreamChunk(
+      { type: 'response.reasoning_summary_text.delta', delta: 'summary thought' },
+      'gpt-5.4',
+      converter.createStreamState()
+    )
+
+    const payload = parseSSEPayload(chunks[0])
+    expect(payload.choices[0].delta.reasoning_content).toBe('summary thought')
+  })
+
+  test('forwards raw reasoning_text.delta as reasoning_content', () => {
+    const converter = new CodexToOpenAIConverter()
+    const chunks = converter.convertStreamChunk(
+      { type: 'response.reasoning_text.delta', delta: 'raw chain of thought' },
+      'gpt-5.4',
+      converter.createStreamState()
+    )
+
+    expect(chunks.length).toBeGreaterThan(0)
+    const payload = parseSSEPayload(chunks[0])
+    expect(payload.choices[0].delta.reasoning_content).toBe('raw chain of thought')
+  })
+
+  test('treats reasoning_text.done as a signal only and emits no content', () => {
+    const converter = new CodexToOpenAIConverter()
+    const chunks = converter.convertStreamChunk(
+      { type: 'response.reasoning_text.done', text: 'raw chain of thought' },
+      'gpt-5.4',
+      converter.createStreamState()
+    )
+
+    expect(chunks).toEqual([])
+  })
+})

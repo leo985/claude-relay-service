@@ -8,6 +8,7 @@ const apiKeyService = require('../services/apiKeyService')
 const crypto = require('crypto')
 const upstreamErrorHelper = require('../utils/upstreamErrorHelper')
 const { createRequestDetailMeta } = require('../utils/requestDetailHelper')
+const { normalizeUsage } = require('../utils/usageNormalizer')
 
 // 支持的模型列表 - 基于真实的 Azure OpenAI 模型
 const ALLOWED_MODELS = {
@@ -78,16 +79,11 @@ class AtomicUsageReporter {
     requestMeta = null
   ) {
     try {
-      const inputTokens = usageData.prompt_tokens || usageData.input_tokens || 0
-      const outputTokens = usageData.completion_tokens || usageData.output_tokens || 0
-      const cacheCreateTokens =
-        usageData.prompt_tokens_details?.cache_creation_tokens ||
-        usageData.input_tokens_details?.cache_creation_tokens ||
-        0
-      const cacheReadTokens =
-        usageData.prompt_tokens_details?.cached_tokens ||
-        usageData.input_tokens_details?.cached_tokens ||
-        0
+      const normalizedUsage = normalizeUsage('azure-openai', usageData, {
+        inputIncludesCacheRead: true
+      })
+      const { inputTokens, outputTokens, cacheCreateTokens, cacheReadTokens, totalTokens } =
+        normalizedUsage
 
       await apiKeyService.recordUsage(
         apiKeyId,
@@ -104,7 +100,6 @@ class AtomicUsageReporter {
 
       // 同步更新 Azure 账户的 lastUsedAt 和累计使用量
       try {
-        const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
         if (accountId) {
           await azureOpenaiAccountService.updateAccountUsage(accountId, totalTokens)
         }
