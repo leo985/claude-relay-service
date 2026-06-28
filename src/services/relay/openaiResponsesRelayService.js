@@ -431,6 +431,19 @@ class OpenAIResponsesRelayService {
       )
     }
 
+    // 兼容智谱/火山方舟：chat completions 上游识别 enable_thinking=true 而非 reasoning_effort。
+    // 当客户端表达 reasoning 意图且未显式禁用时，注入 enable_thinking=true 让上游产出 reasoning_content。
+    // OpenAI 官方端点忽略未知字段，跨供应商安全。
+    if (
+      endpointKind === 'chat_completions' &&
+      features.hasReasoning &&
+      body &&
+      typeof body === 'object' &&
+      body.enable_thinking === undefined
+    ) {
+      body.enable_thinking = true
+    }
+
     const maxOutputTokens = parseInt(account.maxOutputTokens, 10) || 0
     if (maxOutputTokens <= 0 || !body || typeof body !== 'object') {
       return

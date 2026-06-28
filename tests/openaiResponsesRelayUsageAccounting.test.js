@@ -505,4 +505,91 @@ describe('openaiResponsesRelayService usage accounting', () => {
       messages: [{ role: 'user', content: 'hello' }]
     })
   })
+
+  test('injects enable_thinking for chat_completions clients with reasoning_effort on chat_completions accounts', () => {
+    // 模拟 unified.js 处理后的 trae-ide 请求：endpointKind=chat_completions 进入 else 分支
+    const chatBody = {
+      model: 'glm-5.2',
+      messages: [{ role: 'user', content: 'hi' }],
+      reasoning_effort: 'medium',
+      stream: true
+    }
+    const req = createReq({
+      path: '/v1/responses',
+      body: clonePlainObjectIfFn(chatBody),
+      _openaiCompatibleOriginal: {
+        path: '/v1/chat/completions',
+        endpointKind: 'chat_completions',
+        body: clonePlainObjectIfFn(chatBody)
+      }
+    })
+
+    const result = openaiResponsesRelayService.resolveUpstreamRequest(req, {
+      id: 'acct-glm',
+      providerEndpoint: 'chat_completions',
+      supportsReasoning: true,
+      boundModel: 'glm-5.2'
+    })
+
+    expect(result.targetPath).toBe('/v1/chat/completions')
+    expect(result.body.enable_thinking).toBe(true)
+    expect(result.body.messages).toBeDefined()
+  })
+
+  test('does not inject enable_thinking when client has not requested reasoning', () => {
+    const chatBody = {
+      model: 'glm-5.2',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true
+    }
+    const req = createReq({
+      path: '/v1/responses',
+      body: clonePlainObjectIfFn(chatBody),
+      _openaiCompatibleOriginal: {
+        path: '/v1/chat/completions',
+        endpointKind: 'chat_completions',
+        body: clonePlainObjectIfFn(chatBody)
+      }
+    })
+
+    const result = openaiResponsesRelayService.resolveUpstreamRequest(req, {
+      id: 'acct-glm',
+      providerEndpoint: 'chat_completions',
+      boundModel: 'glm-5.2'
+    })
+
+    expect(result.body.enable_thinking).toBeUndefined()
+  })
+
+  test('preserves explicit enable_thinking=false from client', () => {
+    const chatBody = {
+      model: 'glm-5.2',
+      messages: [{ role: 'user', content: 'hi' }],
+      reasoning_effort: 'medium',
+      enable_thinking: false,
+      stream: true
+    }
+    const req = createReq({
+      path: '/v1/responses',
+      body: clonePlainObjectIfFn(chatBody),
+      _openaiCompatibleOriginal: {
+        path: '/v1/chat/completions',
+        endpointKind: 'chat_completions',
+        body: clonePlainObjectIfFn(chatBody)
+      }
+    })
+
+    const result = openaiResponsesRelayService.resolveUpstreamRequest(req, {
+      id: 'acct-glm',
+      providerEndpoint: 'chat_completions',
+      supportsReasoning: true,
+      boundModel: 'glm-5.2'
+    })
+
+    expect(result.body.enable_thinking).toBe(false)
+  })
 })
+
+function clonePlainObjectIfFn(obj) {
+  return JSON.parse(JSON.stringify(obj))
+}
