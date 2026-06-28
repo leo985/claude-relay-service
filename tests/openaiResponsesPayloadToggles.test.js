@@ -115,6 +115,7 @@ const RESPONSES_REQUEST_FEATURES = {
   hasImageGeneration: false,
   hasReasoning: false,
   openaiResponsesOnly: false,
+  allowOpenAITokenForAnthropicImages: false,
   allowOpenAITokenForOpenAICompatibleImages: false
 }
 
