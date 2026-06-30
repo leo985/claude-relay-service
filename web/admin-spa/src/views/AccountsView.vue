@@ -251,7 +251,7 @@
                   </div>
                 </th>
                 <th
-                  class="name-column sticky z-20 min-w-[180px] cursor-pointer px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-600"
+                  class="name-column sticky z-20 w-[260px] min-w-[240px] cursor-pointer px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-600"
                   :class="shouldShowCheckboxes ? 'left-[50px]' : 'left-0'"
                   @click="sortAccounts('name')"
                 >
@@ -491,20 +491,20 @@
                   </div>
                 </td>
                 <td
-                  class="name-column sticky z-10 px-3 py-4"
+                  class="name-column sticky z-10 w-[260px] min-w-[240px] px-3 py-4 align-top"
                   :class="shouldShowCheckboxes ? 'left-[50px]' : 'left-0'"
                 >
-                  <div class="flex items-center">
+                  <div class="flex items-start">
                     <div
                       class="mr-2 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-green-500 to-green-600"
                     >
                       <i class="fas fa-user-circle text-xs text-white" />
                     </div>
-                    <div class="min-w-0">
-                      <div class="flex items-center gap-2">
+                    <div class="min-w-0 flex-1">
+                      <div class="flex flex-wrap items-center gap-2">
                         <div
-                          class="cursor-pointer truncate text-sm font-semibold text-gray-900 hover:text-blue-600 dark:text-gray-100 dark:hover:text-blue-400"
-                          title="点击复制"
+                          class="account-name-text max-w-full cursor-pointer text-sm font-semibold leading-snug text-gray-900 hover:text-blue-600 dark:text-gray-100 dark:hover:text-blue-400"
+                          :title="`${account.name || account.email || account.id}（点击复制）`"
                           @click.stop="copyText(account.name)"
                         >
                           {{ account.name }}
@@ -1455,8 +1455,8 @@
           class="card p-4 transition-shadow hover:shadow-lg"
         >
           <!-- 卡片头部 -->
-          <div class="mb-3 flex items-start justify-between">
-            <div class="flex items-center gap-3">
+          <div class="mb-3 flex items-start justify-between gap-3">
+            <div class="flex min-w-0 flex-1 items-center gap-3">
               <input
                 v-if="shouldShowCheckboxes"
                 v-model="selectedAccounts"
@@ -1502,10 +1502,10 @@
                   ]"
                 />
               </div>
-              <div>
+              <div class="min-w-0 flex-1">
                 <h4
-                  class="cursor-pointer text-sm font-semibold text-gray-900 hover:text-blue-600 dark:hover:text-blue-400"
-                  title="点击复制"
+                  class="account-name-text cursor-pointer text-sm font-semibold leading-snug text-gray-900 hover:text-blue-600 dark:hover:text-blue-400"
+                  :title="`${account.name || account.email || account.id}（点击复制）`"
                   @click.stop="copyText(account.name || account.email)"
                 >
                   {{ account.name || account.email }}
@@ -1521,7 +1521,7 @@
             </div>
             <span
               :class="[
-                'inline-flex items-center rounded-full px-2 py-1 text-xs font-semibold',
+                'inline-flex flex-shrink-0 items-center rounded-full px-2 py-1 text-xs font-semibold',
                 getAccountStatusClass(account)
               ]"
             >
@@ -5381,6 +5381,16 @@ onUnmounted(() => {
   min-width: 1400px;
   border-collapse: collapse;
   table-layout: auto;
+}
+
+.table-container .name-column {
+  width: 260px;
+  max-width: 300px;
+}
+
+.account-name-text {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* 滚动条样式 */
