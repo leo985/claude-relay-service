@@ -117,6 +117,99 @@ function getUsageCacheDetailsForLog(usageData = {}) {
   return Object.keys(details).length > 0 ? details : undefined
 }
 
+const EMPTY_ASSISTANT_MESSAGE_PLACEHOLDER = ' '
+
+function hasValidAssistantContent(message = {}) {
+  if (!Object.prototype.hasOwnProperty.call(message, 'content')) {
+    return false
+  }
+
+  const { content } = message
+  if (content === undefined || content === null) {
+    return false
+  }
+  if (typeof content === 'string') {
+    return content.length > 0
+  }
+  if (Array.isArray(content)) {
+    return content.length > 0
+  }
+
+  return true
+}
+
+function hasValidAssistantToolCalls(message = {}) {
+  return Array.isArray(message.tool_calls) && message.tool_calls.length > 0
+}
+
+function isEmptyAssistantMessage(message) {
+  return (
+    message &&
+    typeof message === 'object' &&
+    !Array.isArray(message) &&
+    message.role === 'assistant' &&
+    !hasValidAssistantContent(message) &&
+    !hasValidAssistantToolCalls(message)
+  )
+}
+
+function buildAssistantPlaceholderMessage(message) {
+  if (!message || typeof message !== 'object' || Array.isArray(message)) {
+    return { role: 'assistant', content: EMPTY_ASSISTANT_MESSAGE_PLACEHOLDER }
+  }
+
+  const fallback = {
+    ...message,
+    content: EMPTY_ASSISTANT_MESSAGE_PLACEHOLDER
+  }
+
+  if (Array.isArray(fallback.tool_calls) && fallback.tool_calls.length === 0) {
+    delete fallback.tool_calls
+  }
+
+  return fallback
+}
+
+function sanitizeChatCompletionAssistantMessages(body) {
+  if (!body || typeof body !== 'object' || !Array.isArray(body.messages)) {
+    return null
+  }
+
+  const droppedIndexes = []
+  let firstDroppedMessage = null
+  const keptMessages = []
+
+  body.messages.forEach((message, index) => {
+    if (!isEmptyAssistantMessage(message)) {
+      keptMessages.push(message)
+      return
+    }
+
+    droppedIndexes.push(index)
+    if (!firstDroppedMessage) {
+      firstDroppedMessage = message
+    }
+  })
+
+  if (droppedIndexes.length === 0) {
+    return null
+  }
+
+  let placeholderApplied = false
+  if (keptMessages.length === 0) {
+    keptMessages.push(buildAssistantPlaceholderMessage(firstDroppedMessage))
+    placeholderApplied = true
+  }
+
+  body.messages = keptMessages
+
+  return {
+    droppedCount: droppedIndexes.length,
+    droppedIndexes,
+    placeholderApplied
+  }
+}
+
 function isAnthropicUsageContext({ providerEndpoint, responseAdapter } = {}) {
   if (responseAdapter === 'claude_to_responses') {
     return true
@@ -470,6 +563,24 @@ class OpenAIResponsesRelayService {
 
   _validateAndAdjustRequestBody(body, account, bodyKind) {
     const endpointKind = bodyKind === 'chat_completions' ? 'chat_completions' : 'responses'
+    if (endpointKind === 'chat_completions') {
+      const sanitized = sanitizeChatCompletionAssistantMessages(body)
+      if (sanitized) {
+        logger.warn(
+          '🧹 Sanitized empty assistant messages before Chat Completions upstream relay',
+          {
+            accountId: account?.id,
+            accountName: account?.name,
+            model: body?.model,
+            droppedCount: sanitized.droppedCount,
+            droppedIndexes: sanitized.droppedIndexes.slice(0, 20),
+            droppedIndexesTruncated: sanitized.droppedIndexes.length > 20,
+            placeholderApplied: sanitized.placeholderApplied
+          }
+        )
+      }
+    }
+
     const features = getRequestFeaturesFromBody(body || {}, endpointKind)
 
     if (features.hasTools && account.supportsTools === false) {
@@ -699,7 +810,7 @@ class OpenAIResponsesRelayService {
     }
 
     const targetPath = String(upstreamRequest.targetPath || '').split('?')[0]
-    if (!targetPath.endsWith('/v1/messages')) {
+    if (!targetPath.endsWith('/v1/messages') && !targetPath.endsWith('/v1/messages/count_tokens')) {
       return false
     }
 
@@ -794,6 +905,10 @@ class OpenAIResponsesRelayService {
       res.once('close', handleClientDisconnect)
 
       const upstreamRequest = this.resolveUpstreamRequest(req, fullAccount)
+      if (typeof options.customPath === 'string' && options.customPath.trim()) {
+        const customPath = options.customPath.trim()
+        upstreamRequest.targetPath = customPath.startsWith('/') ? customPath : `/${customPath}`
+      }
       this._ensureChatCompletionsStreamUsage(upstreamRequest.body, upstreamRequest.providerEndpoint)
       req._openaiCompatibleUpstreamBody = upstreamRequest.body
       req._openaiCompatibleResponseAdapter = upstreamRequest.responseAdapter
@@ -1028,7 +1143,8 @@ class OpenAIResponsesRelayService {
             ? upstreamRequest.requestedModel
             : upstreamRequest.upstreamModel || upstreamRequest.requestedModel,
           handleClientDisconnect,
-          req
+          req,
+          { skipUsageRecord: options.skipUsageRecord === true }
         )
       }
 
@@ -1041,7 +1157,8 @@ class OpenAIResponsesRelayService {
         upstreamRequest.responseAdapter
           ? upstreamRequest.requestedModel
           : upstreamRequest.upstreamModel || upstreamRequest.requestedModel,
-        req
+        req,
+        { skipUsageRecord: options.skipUsageRecord === true }
       )
     } catch (error) {
       // 清理 AbortController
@@ -1240,7 +1357,8 @@ class OpenAIResponsesRelayService {
     apiKeyData,
     requestedModel,
     handleClientDisconnect,
-    req
+    req,
+    options = {}
   ) {
     // 设置 SSE 响应头
     res.setHeader('Content-Type', 'text/event-stream')
@@ -1488,7 +1606,7 @@ class OpenAIResponsesRelayService {
       }
 
       // 先记录真实 usage；如果没有 usage 且不是限流错误，再补记 0-token 成功请求。
-      if (usageData || !rateLimitDetected) {
+      if (!options.skipUsageRecord && (usageData || !rateLimitDetected)) {
         try {
           const result = await this._recordSuccessfulUsage({
             req,
@@ -1513,6 +1631,8 @@ class OpenAIResponsesRelayService {
         } catch (error) {
           logger.error('Failed to record usage:', error)
         }
+      } else if (options.skipUsageRecord) {
+        logger.info('📊 Skipped stream usage recording for OpenAI-compatible request')
       }
 
       // 如果在流式响应中检测到限流
@@ -1594,7 +1714,15 @@ class OpenAIResponsesRelayService {
   }
 
   // 处理非流式响应
-  async _handleNormalResponse(response, res, account, apiKeyData, requestedModel, req) {
+  async _handleNormalResponse(
+    response,
+    res,
+    account,
+    apiKeyData,
+    requestedModel,
+    req,
+    options = {}
+  ) {
     const responseData = response.data
     let clientResponseData = responseData
     const clientModelAlias = this._getClientModelAlias(req, requestedModel)
@@ -1606,29 +1734,33 @@ class OpenAIResponsesRelayService {
       responseData?.model || responseData?.response?.model || requestedModel || 'gpt-4'
 
     // 记录使用统计；成功但无 usage 时也补记 0-token 请求，用于 API Key 请求数和 lastUsedAt。
-    try {
-      const result = await this._recordSuccessfulUsage({
-        req,
-        res,
-        account,
-        apiKeyData,
-        requestedModel,
-        actualModel,
-        usageData,
-        stream: false,
-        statusCode: response.status,
-        context: 'openai-compatible-non-stream',
-        fallbackReason: usageData ? '' : 'non-stream response without usage'
-      })
+    if (!options.skipUsageRecord) {
+      try {
+        const result = await this._recordSuccessfulUsage({
+          req,
+          res,
+          account,
+          apiKeyData,
+          requestedModel,
+          actualModel,
+          usageData,
+          stream: false,
+          statusCode: response.status,
+          context: 'openai-compatible-non-stream',
+          fallbackReason: usageData ? '' : 'non-stream response without usage'
+        })
 
-      const { usageSummary, modelToRecord } = result
-      const cacheDetails = getUsageCacheDetailsForLog(usageData)
-      logger.info(
-        `📊 Recorded non-stream usage - Input: ${usageSummary.totalInputTokens}(actual:${usageSummary.inputTokens}+cached:${usageSummary.cacheReadTokens}), CacheCreate: ${usageSummary.cacheCreateTokens}, Output: ${usageSummary.outputTokens}, Total: ${usageSummary.totalTokens}, Model: ${modelToRecord}`,
-        cacheDetails ? { cache_details: cacheDetails } : {}
-      )
-    } catch (error) {
-      logger.error('Failed to record usage:', error)
+        const { usageSummary, modelToRecord } = result
+        const cacheDetails = getUsageCacheDetailsForLog(usageData)
+        logger.info(
+          `📊 Recorded non-stream usage - Input: ${usageSummary.totalInputTokens}(actual:${usageSummary.inputTokens}+cached:${usageSummary.cacheReadTokens}), CacheCreate: ${usageSummary.cacheCreateTokens}, Output: ${usageSummary.outputTokens}, Total: ${usageSummary.totalTokens}, Model: ${modelToRecord}`,
+          cacheDetails ? { cache_details: cacheDetails } : {}
+        )
+      } catch (error) {
+        logger.error('Failed to record usage:', error)
+      }
+    } else {
+      logger.info('📊 Skipped non-stream usage recording for OpenAI-compatible request')
     }
 
     if (req._openaiCompatibleResponseAdapter === 'responses_to_chat') {

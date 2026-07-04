@@ -73,6 +73,8 @@ const apiKeyService = require('../src/services/apiKeyService')
 const openaiResponsesAccountService = require('../src/services/account/openaiResponsesAccountService')
 const { extractOpenAICacheReadTokens } = require('../src/utils/requestDetailHelper')
 const { updateRateLimitCounters } = require('../src/utils/rateLimitHelper')
+const logger = require('../src/utils/logger')
+const axios = require('axios')
 
 function createReq(overrides = {}) {
   const emitter = new EventEmitter()
@@ -534,6 +536,158 @@ describe('openaiResponsesRelayService usage accounting', () => {
     expect(result.targetPath).toBe('/v1/chat/completions')
     expect(result.body.enable_thinking).toBe(true)
     expect(result.body.messages).toBeDefined()
+  })
+
+  test('drops empty assistant messages before forwarding to Chat Completions upstreams', () => {
+    const chatBody = {
+      model: 'gpt-5.5',
+      messages: [
+        { role: 'user', content: 'hi' },
+        { role: 'assistant' },
+        { role: 'assistant', content: '' },
+        { role: 'assistant', content: [] },
+        { role: 'assistant', content: ' ' },
+        {
+          role: 'assistant',
+          tool_calls: [
+            {
+              id: 'call_1',
+              type: 'function',
+              function: { name: 'lookup', arguments: '{}' }
+            }
+          ]
+        },
+        { role: 'user', content: 'again' }
+      ]
+    }
+    const req = createReq({
+      path: '/v1/responses',
+      body: clonePlainObjectIfFn(chatBody),
+      _openaiCompatibleOriginal: {
+        path: '/v1/chat/completions',
+        endpointKind: 'chat_completions',
+        body: clonePlainObjectIfFn(chatBody)
+      }
+    })
+
+    const result = openaiResponsesRelayService.resolveUpstreamRequest(req, {
+      id: 'acct-glm',
+      name: 'GLM account',
+      providerEndpoint: 'chat_completions',
+      boundModel: 'astron-code-latest'
+    })
+
+    expect(result.body.messages).toEqual([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: ' ' },
+      {
+        role: 'assistant',
+        tool_calls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'lookup', arguments: '{}' }
+          }
+        ]
+      },
+      { role: 'user', content: 'again' }
+    ])
+    expect(logger.warn).toHaveBeenCalledWith(
+      '🧹 Sanitized empty assistant messages before Chat Completions upstream relay',
+      expect.objectContaining({
+        accountId: 'acct-glm',
+        accountName: 'GLM account',
+        model: 'astron-code-latest',
+        droppedCount: 3,
+        droppedIndexes: [1, 2, 3],
+        placeholderApplied: false
+      })
+    )
+  })
+
+  test('uses a blank assistant placeholder when all Chat Completions messages would be dropped', () => {
+    const chatBody = {
+      model: 'gpt-5.5',
+      messages: [{ role: 'assistant', tool_calls: [] }]
+    }
+    const req = createReq({
+      path: '/v1/responses',
+      body: clonePlainObjectIfFn(chatBody),
+      _openaiCompatibleOriginal: {
+        path: '/v1/chat/completions',
+        endpointKind: 'chat_completions',
+        body: clonePlainObjectIfFn(chatBody)
+      }
+    })
+
+    const result = openaiResponsesRelayService.resolveUpstreamRequest(req, {
+      id: 'acct-glm',
+      providerEndpoint: 'chat_completions',
+      boundModel: 'astron-code-latest'
+    })
+
+    expect(result.body.messages).toEqual([{ role: 'assistant', content: ' ' }])
+    expect(result.body.messages[0].tool_calls).toBeUndefined()
+    expect(logger.warn).toHaveBeenCalledWith(
+      '🧹 Sanitized empty assistant messages before Chat Completions upstream relay',
+      expect.objectContaining({
+        accountId: 'acct-glm',
+        droppedCount: 1,
+        droppedIndexes: [0],
+        placeholderApplied: true
+      })
+    )
+  })
+
+  test('forwards custom count_tokens path without recording OpenAI-compatible usage', async () => {
+    openaiResponsesAccountService.getAccount.mockResolvedValue({
+      id: 'acct-count',
+      name: 'Ark Passthrough',
+      apiKey: 'secret',
+      baseApi: 'https://ark.cn-beijing.volces.com/api/plan',
+      providerEndpoint: 'passthrough',
+      boundModel: 'glm-5.2'
+    })
+    axios.mockResolvedValue({
+      status: 200,
+      statusText: 'OK',
+      headers: {},
+      data: { input_tokens: 1234 }
+    })
+
+    const req = createReq({
+      method: 'POST',
+      path: '/v1/messages/count_tokens',
+      url: '/v1/messages/count_tokens?beta=true',
+      body: {
+        model: 'glm-5.2',
+        messages: [{ role: 'user', content: 'hello' }]
+      }
+    })
+    const res = createRes()
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-count', name: 'Ark Passthrough' },
+      { id: 'key-1' },
+      {
+        customPath: '/v1/messages/count_tokens',
+        skipUsageRecord: true
+      }
+    )
+
+    expect(axios).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'POST',
+        url: 'https://ark.cn-beijing.volces.com/api/plan/v1/messages/count_tokens',
+        data: expect.objectContaining({ model: 'glm-5.2' })
+      })
+    )
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.payload).toEqual({ input_tokens: 1234 })
+    expect(apiKeyService.recordUsage).not.toHaveBeenCalled()
+    expect(openaiResponsesAccountService.updateAccountUsage).not.toHaveBeenCalled()
   })
 
   test('does not inject enable_thinking when client has not requested reasoning', () => {

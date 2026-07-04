@@ -50,7 +50,9 @@ jest.mock('../src/services/account/claudeAccountService', () => ({
 }))
 
 jest.mock('../src/services/account/claudeConsoleAccountService', () => ({
-  getAccount: jest.fn()
+  getAccount: jest.fn(),
+  isCountTokensUnavailable: jest.fn(),
+  markCountTokensUnavailable: jest.fn()
 }))
 
 jest.mock('../src/services/relay/openaiResponsesRelayService', () => ({
@@ -76,7 +78,8 @@ jest.mock('../src/utils/warmupInterceptor', () => ({
 }))
 
 jest.mock('../src/utils/errorSanitizer', () => ({
-  sanitizeUpstreamError: jest.fn((value) => value)
+  sanitizeUpstreamError: jest.fn((value) => value),
+  getSafeMessage: jest.fn()
 }))
 
 jest.mock('../src/utils/anthropicRequestDump', () => ({
@@ -108,10 +111,14 @@ jest.mock('../src/utils/logger', () => ({
 
 const unifiedClaudeScheduler = require('../src/services/scheduler/unifiedClaudeScheduler')
 const unifiedOpenAIScheduler = require('../src/services/scheduler/unifiedOpenAIScheduler')
+const claudeConsoleRelayService = require('../src/services/relay/claudeConsoleRelayService')
 const openaiResponsesRelayService = require('../src/services/relay/openaiResponsesRelayService')
 const openaiTokenAnthropicRelayService = require('../src/services/relay/openaiTokenAnthropicRelayService')
+const claudeRelayConfigService = require('../src/services/claudeRelayConfigService')
+const claudeConsoleAccountService = require('../src/services/account/claudeConsoleAccountService')
+const openaiResponsesAccountService = require('../src/services/account/openaiResponsesAccountService')
 const openaiAccountService = require('../src/services/account/openaiAccountService')
-const { handleMessagesRequest } = require('../src/routes/api')
+const { handleMessagesRequest, handleCountTokensRequest } = require('../src/routes/api')
 
 function createReq() {
   return {
@@ -173,6 +180,11 @@ function createRes() {
 describe('/v1/messages OpenAI-Responses fallback', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    claudeRelayConfigService.extractOriginalSessionId.mockReturnValue(null)
+    claudeRelayConfigService.validateNewSession.mockResolvedValue({
+      valid: true,
+      isNewSession: false
+    })
   })
 
   it('preserves the original Claude scheduler error when fallback account selection fails', async () => {
@@ -244,5 +256,164 @@ describe('/v1/messages OpenAI-Responses fallback', () => {
     )
     expect(openaiResponsesRelayService.handleRequest).not.toHaveBeenCalled()
     expect(res.status).toHaveBeenCalledWith(200)
+  })
+})
+
+describe('/v1/messages/count_tokens OpenAI-Responses fallback', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    claudeRelayConfigService.extractOriginalSessionId.mockReturnValue(null)
+    claudeRelayConfigService.validateNewSession.mockResolvedValue({
+      valid: true,
+      isNewSession: false
+    })
+  })
+
+  it('routes count_tokens to OpenAI-Responses passthrough without zero-token fallback', async () => {
+    const claudeError = new Error(
+      'No available Claude accounts support the requested model: glm-5.2'
+    )
+    claudeError.statusCode = 400
+    unifiedClaudeScheduler.selectAccountForApiKey.mockRejectedValue(claudeError)
+    unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValue({
+      accountId: 'responses-count-1',
+      accountType: 'openai-responses'
+    })
+    openaiResponsesAccountService.getAccount.mockResolvedValue({
+      id: 'responses-count-1',
+      name: 'Ark Passthrough'
+    })
+    openaiResponsesRelayService.handleRequest.mockImplementation(async (_req, res) => {
+      res.status(200).json({ input_tokens: 1234 })
+    })
+
+    const req = createReq()
+    req.path = '/v1/messages/count_tokens'
+    req.url = '/v1/messages/count_tokens?beta=true'
+    req.body = {
+      model: 'glm-5.2',
+      messages: [{ role: 'user', content: 'hello' }]
+    }
+    const res = createRes()
+
+    await handleCountTokensRequest(req, res)
+
+    expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenCalledWith(
+      req.apiKey,
+      expect.any(String),
+      'glm-5.2',
+      expect.objectContaining({
+        endpointKind: 'passthrough',
+        openaiResponsesOnly: true
+      })
+    )
+    expect(openaiResponsesRelayService.handleRequest).toHaveBeenCalledWith(
+      req,
+      res,
+      expect.objectContaining({ id: 'responses-count-1' }),
+      req.apiKey,
+      {
+        customPath: '/v1/messages/count_tokens',
+        skipUsageRecord: true
+      }
+    )
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.payload).toEqual({ input_tokens: 1234 })
+    expect(res.payload).not.toEqual({ input_tokens: 0 })
+  })
+
+  it('rejects unsupported fallback account types instead of returning input_tokens zero', async () => {
+    const claudeError = new Error(
+      'No available Claude accounts support the requested model: glm-5.2'
+    )
+    claudeError.statusCode = 400
+    unifiedClaudeScheduler.selectAccountForApiKey.mockRejectedValue(claudeError)
+    unifiedOpenAIScheduler.selectAccountForApiKey.mockResolvedValue({
+      accountId: 'openai-token-1',
+      accountType: 'openai'
+    })
+
+    const req = createReq()
+    req.path = '/v1/messages/count_tokens'
+    req.url = '/v1/messages/count_tokens?beta=true'
+    req.body = {
+      model: 'glm-5.2',
+      messages: [{ role: 'user', content: 'hello' }]
+    }
+    const res = createRes()
+
+    await handleCountTokensRequest(req, res)
+
+    expect(openaiResponsesRelayService.handleRequest).not.toHaveBeenCalled()
+    expect(openaiTokenAnthropicRelayService.handleRequest).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(501)
+    expect(res.payload).toMatchObject({
+      error: {
+        type: 'not_supported',
+        message: 'Token counting is not supported for openai fallback accounts'
+      }
+    })
+    expect(res.payload).not.toEqual({ input_tokens: 0 })
+  })
+
+  it('rejects unavailable Claude Console count_tokens instead of returning input_tokens zero', async () => {
+    unifiedClaudeScheduler.selectAccountForApiKey.mockResolvedValue({
+      accountId: 'console-1',
+      accountType: 'claude-console'
+    })
+    claudeConsoleAccountService.isCountTokensUnavailable.mockResolvedValue(true)
+
+    const req = createReq()
+    req.path = '/v1/messages/count_tokens'
+    req.url = '/v1/messages/count_tokens?beta=true'
+    req.body = {
+      model: 'glm-5.2',
+      messages: [{ role: 'user', content: 'hello' }]
+    }
+    const res = createRes()
+
+    await handleCountTokensRequest(req, res)
+
+    expect(claudeConsoleRelayService.relayRequest).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(501)
+    expect(res.payload).toMatchObject({
+      error: {
+        type: 'not_supported',
+        message: 'Token counting is not available for this Claude Console account'
+      }
+    })
+    expect(res.payload).not.toEqual({ input_tokens: 0 })
+  })
+
+  it('sanitizes upstream/internal error details before returning count_tokens errors', async () => {
+    // 原始上游/内部错误细节不得直接暴露给客户端（与 98145da8 对齐）。
+    const { getSafeMessage } = require('../src/utils/errorSanitizer')
+    getSafeMessage.mockReturnValue('Upstream service error')
+
+    const sensitiveError = new Error(
+      'upstream relay failed for account acme-prod-1 at 10.0.0.5: database connection refused'
+    )
+    sensitiveError.statusCode = 500
+    unifiedClaudeScheduler.selectAccountForApiKey.mockRejectedValue(sensitiveError)
+
+    const req = createReq()
+    req.path = '/v1/messages/count_tokens'
+    req.url = '/v1/messages/count_tokens?beta=true'
+    req.body = {
+      model: 'glm-5.2',
+      messages: [{ role: 'user', content: 'hello' }]
+    }
+    const res = createRes()
+
+    await handleCountTokensRequest(req, res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.payload.error.type).toBe('server_error')
+    expect(res.payload.error.message).toBe('Upstream service error')
+    expect(res.payload.error.message).not.toMatch(/acme-prod-1|10\.0\.0\.5|database connection/i)
+    expect(getSafeMessage).toHaveBeenCalledWith(sensitiveError, {
+      context: 'count_tokens',
+      logOriginal: false
+    })
   })
 })

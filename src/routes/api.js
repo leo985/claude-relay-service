@@ -24,7 +24,7 @@ const {
   buildMockWarmupResponse,
   sendMockWarmupStream
 } = require('../utils/warmupInterceptor')
-const { sanitizeUpstreamError } = require('../utils/errorSanitizer')
+const { sanitizeUpstreamError, getSafeMessage } = require('../utils/errorSanitizer')
 const upstreamErrorHelper = require('../utils/upstreamErrorHelper')
 const { dumpAnthropicMessagesRequest } = require('../utils/anthropicRequestDump')
 const { createRequestDetailMeta } = require('../utils/requestDetailHelper')
@@ -214,6 +214,90 @@ async function fallbackToOpenAIResponses({ req, res, sessionHash, requestedModel
     }
     return false
   }
+}
+
+function createCountTokensError(message, statusCode = 500, type = 'server_error') {
+  const error = new Error(message)
+  error.httpStatus = statusCode
+  error.errorPayload = {
+    error: {
+      type,
+      message
+    }
+  }
+  return error
+}
+
+function getCountTokensErrorStatus(error) {
+  return error?.httpStatus || error?.statusCode || 500
+}
+
+function getCountTokensErrorPayload(error) {
+  // createCountTokensError 生成的通用消息已是安全文案，原样返���。
+  if (error?.errorPayload) {
+    return error.errorPayload
+  }
+
+  // 上游/内部原始错误细节不直接暴露给客户端，message 走白名单净化（与 98145da8 对齐）。
+  const statusCode = getCountTokensErrorStatus(error)
+  return {
+    error: {
+      type: statusCode >= 500 ? 'server_error' : 'invalid_request_error',
+      message: getSafeMessage(error, { context: 'count_tokens', logOriginal: false })
+    }
+  }
+}
+
+async function fallbackCountTokensToOpenAIResponses({ req, res, sessionHash, requestedModel }) {
+  if (!hasOpenAIResponsesFallbackBinding(req.apiKey)) {
+    return false
+  }
+
+  logger.info(
+    `🔀 [count_tokens] Attempting OpenAI-Responses fallback via ${req.apiKey.openaiAccountId}`
+  )
+
+  const selection = await unifiedOpenAIScheduler.selectAccountForApiKey(
+    req.apiKey,
+    sessionHash,
+    requestedModel,
+    getAnthropicPassthroughFeatures(req.body)
+  )
+
+  if (!selection?.accountId) {
+    throw createCountTokensError(
+      'OpenAI-Responses count_tokens fallback did not select an account',
+      402,
+      'service_unavailable'
+    )
+  }
+
+  if (selection.accountType !== 'openai-responses') {
+    throw createCountTokensError(
+      `Token counting is not supported for ${selection.accountType} fallback accounts`,
+      501,
+      'not_supported'
+    )
+  }
+
+  const responsesAccount = await openaiResponsesAccountService.getAccount(selection.accountId)
+  if (!responsesAccount) {
+    throw createCountTokensError(
+      `OpenAI-Responses account ${selection.accountId} not found`,
+      404,
+      'not_found'
+    )
+  }
+
+  logger.info(
+    `🔀 [count_tokens] Falling back to OpenAI-Responses account: ${responsesAccount.name} (${selection.accountId})`
+  )
+
+  await openaiResponsesRelayService.handleRequest(req, res, responsesAccount, req.apiKey, {
+    customPath: '/v1/messages/count_tokens',
+    skipUsageRecord: true
+  })
+  return true
 }
 
 // 🔧 共享的消息处理函数
@@ -1802,7 +1886,7 @@ router.get('/v1/organizations/:org_id/usage', authenticateApiKey, async (req, re
 })
 
 // 🔢 Token计数端点 - count_tokens beta API
-router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) => {
+async function handleCountTokensRequest(req, res) {
   // 按路径强制分流到 Gemini OAuth 账户（避免 model 前缀混乱）
   const forcedVendor = req._anthropicVendor || null
   const requiredService =
@@ -1902,9 +1986,13 @@ router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) =>
       const isUnavailable = await claudeConsoleAccountService.isCountTokensUnavailable(accountId)
       if (isUnavailable) {
         logger.info(
-          `⏭️ count_tokens unavailable for Claude Console account ${accountId}, returning fallback response`
+          `⏭️ count_tokens unavailable for Claude Console account ${accountId}, refusing zero-token fallback`
         )
-        return { fallbackResponse: true }
+        throw createCountTokensError(
+          'Token counting is not available for this Claude Console account',
+          501,
+          'not_supported'
+        )
       }
     }
 
@@ -1938,16 +2026,15 @@ router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) =>
       logger.warn(
         `⚠️ count_tokens endpoint returned 404 for Claude Console account ${accountId}, marking as unavailable`
       )
-      // 标记失败不应影响 fallback 响应
+      // 标记失败不应影响向客户端透出真实上游错误；不能伪造 input_tokens=0。
       try {
         await claudeConsoleAccountService.markCountTokensUnavailable(accountId)
       } catch (markError) {
         logger.error(
-          `❌ Failed to mark count_tokens unavailable for account ${accountId}, but will still return fallback:`,
+          `❌ Failed to mark count_tokens unavailable for account ${accountId}, but will still return upstream response:`,
           markError
         )
       }
-      return { fallbackResponse: true }
     }
 
     res.status(response.statusCode)
@@ -1979,12 +2066,13 @@ router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) =>
     try {
       const result = await processRequest()
 
-      // 🔍 处理 fallback 响应（claude-console 账户 count_tokens 不可用）
+      // count_tokens 不允许返回伪造的 { input_tokens: 0 }，否则会影响客户端计费/预算判断。
       if (result && result.fallbackResponse) {
-        if (!res.headersSent) {
-          return res.status(200).json({ input_tokens: 0 })
-        }
-        return
+        throw createCountTokensError(
+          'Token count fallback response is disabled',
+          501,
+          'not_supported'
+        )
       }
 
       return
@@ -2031,6 +2119,43 @@ router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) =>
         return res.status(error.httpStatus).json(error.errorPayload)
       }
 
+      if (error.message && error.message.includes('No available Claude accounts')) {
+        try {
+          const didFallback = await fallbackCountTokensToOpenAIResponses({
+            req,
+            res,
+            sessionHash,
+            requestedModel
+          })
+          if (didFallback) {
+            return
+          }
+        } catch (fallbackError) {
+          logger.error(
+            `❌ [count_tokens] OpenAI-Responses fallback failed: ${fallbackError.message}`
+          )
+          if (!res.headersSent) {
+            return res
+              .status(getCountTokensErrorStatus(fallbackError))
+              .json(getCountTokensErrorPayload(fallbackError))
+          }
+          if (!res.destroyed && !res.finished) {
+            res.end()
+          }
+          return
+        }
+      }
+
+      if (error.statusCode) {
+        // 原始上游/内部错误细节只保留在日志，客户端仅拿到白名单净化后的消息（与 98145da8 对齐）。
+        logger.warn('⚠️ count_tokens request failed (details kept server-side only)', {
+          statusCode: error.statusCode,
+          code: error.code,
+          message: error.message
+        })
+        return res.status(error.statusCode).json(getCountTokensErrorPayload(error))
+      }
+
       // 客户端断开连接不是错误，使用 INFO 级别
       if (error.message === 'Client disconnected') {
         logger.info('🔌 Client disconnected during token count request')
@@ -2059,7 +2184,9 @@ router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) =>
       return
     }
   }
-})
+}
+
+router.post('/v1/messages/count_tokens', authenticateApiKey, handleCountTokensRequest)
 
 // Claude Code 客户端遥测端点 - 返回成功响应避免 404 日志
 router.post('/api/event_logging/batch', (req, res) => {
@@ -2068,3 +2195,4 @@ router.post('/api/event_logging/batch', (req, res) => {
 
 module.exports = router
 module.exports.handleMessagesRequest = handleMessagesRequest
+module.exports.handleCountTokensRequest = handleCountTokensRequest
