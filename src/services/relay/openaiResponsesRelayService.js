@@ -57,6 +57,66 @@ function extractCacheCreationTokens(usageData) {
   return 0
 }
 
+function pickUsageTokenDetailFields(details) {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) {
+    return undefined
+  }
+
+  const allowedKeys = [
+    'cached_tokens',
+    'cached_token',
+    'cache_creation_input_tokens',
+    'cache_creation_tokens'
+  ]
+  const picked = {}
+
+  for (const key of allowedKeys) {
+    if (details[key] !== undefined && details[key] !== null && details[key] !== '') {
+      picked[key] = details[key]
+    }
+  }
+
+  return Object.keys(picked).length > 0 ? picked : undefined
+}
+
+function getUsageCacheDetailsForLog(usageData = {}) {
+  if (!usageData || typeof usageData !== 'object') {
+    return undefined
+  }
+
+  const details = {}
+  const rootKeys = [
+    'cache_read_input_tokens',
+    'cacheReadTokens',
+    'cachedContentTokenCount',
+    'cache_creation_input_tokens',
+    'cache_creation_tokens'
+  ]
+
+  for (const key of rootKeys) {
+    if (usageData[key] !== undefined && usageData[key] !== null && usageData[key] !== '') {
+      details[key] = usageData[key]
+    }
+  }
+
+  const inputTokenDetails = pickUsageTokenDetailFields(usageData.input_tokens_details)
+  if (inputTokenDetails) {
+    details.input_tokens_details = inputTokenDetails
+  }
+
+  const promptTokenDetails = pickUsageTokenDetailFields(usageData.prompt_tokens_details)
+  if (promptTokenDetails) {
+    details.prompt_tokens_details = promptTokenDetails
+  }
+
+  const cacheCreationDetails = pickUsageTokenDetailFields(usageData.cache_creation)
+  if (cacheCreationDetails) {
+    details.cache_creation = cacheCreationDetails
+  }
+
+  return Object.keys(details).length > 0 ? details : undefined
+}
+
 function isAnthropicUsageContext({ providerEndpoint, responseAdapter } = {}) {
   if (responseAdapter === 'claude_to_responses') {
     return true
@@ -1232,10 +1292,12 @@ class OpenAIResponsesRelayService {
             }
             if (eventData.usage) {
               usageData = eventData.usage
+              const cacheDetails = getUsageCacheDetailsForLog(usageData)
               logger.info('📊 Successfully captured usage data from Chat Completions stream:', {
                 prompt_tokens: usageData.prompt_tokens,
                 completion_tokens: usageData.completion_tokens,
-                total_tokens: usageData.total_tokens
+                total_tokens: usageData.total_tokens,
+                ...(cacheDetails ? { cache_details: cacheDetails } : {})
               })
             }
 
@@ -1250,10 +1312,12 @@ class OpenAIResponsesRelayService {
               // 获取 usage 数据 - OpenAI-Responses 格式在 response.usage 下
               if (eventData.response.usage) {
                 usageData = eventData.response.usage
+                const cacheDetails = getUsageCacheDetailsForLog(usageData)
                 logger.info('📊 Successfully captured usage data from OpenAI-Responses:', {
                   input_tokens: usageData.input_tokens,
                   output_tokens: usageData.output_tokens,
-                  total_tokens: usageData.total_tokens
+                  total_tokens: usageData.total_tokens,
+                  ...(cacheDetails ? { cache_details: cacheDetails } : {})
                 })
               }
             }
@@ -1441,8 +1505,10 @@ class OpenAIResponsesRelayService {
           })
 
           const { usageSummary, modelToRecord } = result
+          const cacheDetails = getUsageCacheDetailsForLog(usageData)
           logger.info(
-            `📊 Recorded stream usage - Input: ${usageSummary.totalInputTokens}(actual:${usageSummary.inputTokens}+cached:${usageSummary.cacheReadTokens}), CacheCreate: ${usageSummary.cacheCreateTokens}, Output: ${usageSummary.outputTokens}, Total: ${usageSummary.totalTokens}, Model: ${modelToRecord}`
+            `📊 Recorded stream usage - Input: ${usageSummary.totalInputTokens}(actual:${usageSummary.inputTokens}+cached:${usageSummary.cacheReadTokens}), CacheCreate: ${usageSummary.cacheCreateTokens}, Output: ${usageSummary.outputTokens}, Total: ${usageSummary.totalTokens}, Model: ${modelToRecord}`,
+            cacheDetails ? { cache_details: cacheDetails } : {}
           )
         } catch (error) {
           logger.error('Failed to record usage:', error)
@@ -1556,8 +1622,10 @@ class OpenAIResponsesRelayService {
       })
 
       const { usageSummary, modelToRecord } = result
+      const cacheDetails = getUsageCacheDetailsForLog(usageData)
       logger.info(
-        `📊 Recorded non-stream usage - Input: ${usageSummary.totalInputTokens}(actual:${usageSummary.inputTokens}+cached:${usageSummary.cacheReadTokens}), CacheCreate: ${usageSummary.cacheCreateTokens}, Output: ${usageSummary.outputTokens}, Total: ${usageSummary.totalTokens}, Model: ${modelToRecord}`
+        `📊 Recorded non-stream usage - Input: ${usageSummary.totalInputTokens}(actual:${usageSummary.inputTokens}+cached:${usageSummary.cacheReadTokens}), CacheCreate: ${usageSummary.cacheCreateTokens}, Output: ${usageSummary.outputTokens}, Total: ${usageSummary.totalTokens}, Model: ${modelToRecord}`,
+        cacheDetails ? { cache_details: cacheDetails } : {}
       )
     } catch (error) {
       logger.error('Failed to record usage:', error)
