@@ -204,11 +204,40 @@ run "${SSH_CMD} 'cd ${REMOTE_DIR} && node scripts/manage.js restart -d 2>&1'"
 # ---------- 验证 ----------
 echo ""
 echo "等待服务启动..."
-sleep 8
+
+# 轮询健康检查：服务启动路径为 `npm run lint && node app.js`（含 lint、Redis 连接、模型加载），
+# 固定 sleep 无法覆盖慢启动场景；改为轮询，成功即停，耗尽才判失败并触发回滚。
+HEALTH_MAX_ATTEMPTS=30
+HEALTH_INTERVAL=2
+HEALTH_TOTAL_WAIT=$((HEALTH_MAX_ATTEMPTS * HEALTH_INTERVAL))
+HEALTH_OK=false
+
+if [ "$DRY_RUN" = true ]; then
+  echo "[DRY-RUN] 轮询健康检查 (最多 ${HEALTH_MAX_ATTEMPTS} 次, 每次间隔 ${HEALTH_INTERVAL}s, 最长 ${HEALTH_TOTAL_WAIT}s)"
+  echo "[DRY-RUN] ${SSH_CMD} 'curl -fsS http://localhost:3000/health'"
+else
+  for i in $(seq 1 "$HEALTH_MAX_ATTEMPTS"); do
+    if ${SSH_CMD} 'curl -fsS http://localhost:3000/health' >/dev/null 2>&1; then
+      HEALTH_OK=true
+      echo "  ✅ 服务已就绪 (第 ${i}/${HEALTH_MAX_ATTEMPTS} 次检查成功)"
+      break
+    fi
+    echo "  ⏳ 等待服务就绪... (${i}/${HEALTH_MAX_ATTEMPTS}, 最长 ${HEALTH_TOTAL_WAIT}s)"
+    sleep "$HEALTH_INTERVAL"
+  done
+fi
 
 echo ""
-echo "验证服务状态..."
-run "${SSH_CMD} 'curl -fsS http://localhost:3000/health'"
+if [ "$HEALTH_OK" = true ]; then
+  echo "验证服务状态..."
+  run "${SSH_CMD} 'curl -fsS http://localhost:3000/health'"
+elif [ "$DRY_RUN" = true ]; then
+  echo "[DRY-RUN] 跳过健康检查结果判定"
+else
+  echo "❌ 健康检查失败：服务在 ${HEALTH_TOTAL_WAIT}s 内未就绪"
+  rollback
+  exit 1
+fi
 
 echo ""
 echo "============================================"
