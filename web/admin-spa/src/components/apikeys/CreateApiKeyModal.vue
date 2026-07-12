@@ -742,6 +742,20 @@
                   placeholder="请选择Claude账号"
                   platform="claude"
                 />
+                <div v-if="isGroupBinding(form.claudeAccountId)" class="mt-2">
+                  <label class="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400"
+                    >组内优先账号</label
+                  >
+                  <AccountSelector
+                    v-model="form.preferredClaudeAccountId"
+                    :accounts="preferredClaudeAccounts"
+                    default-option-text="不指定，按分组优先级调度"
+                    :disabled="form.permissions.length > 0 && !form.permissions.includes('claude')"
+                    :groups="[]"
+                    placeholder="请选择组内优先Claude账号"
+                    platform="claude"
+                  />
+                </div>
               </div>
               <div>
                 <label class="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-400"
@@ -756,6 +770,20 @@
                   placeholder="请选择Gemini账号"
                   platform="gemini"
                 />
+                <div v-if="isGroupBinding(form.geminiAccountId)" class="mt-2">
+                  <label class="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400"
+                    >组内优先账号</label
+                  >
+                  <AccountSelector
+                    v-model="form.preferredGeminiAccountId"
+                    :accounts="preferredGeminiAccounts"
+                    default-option-text="不指定，按分组优先级调度"
+                    :disabled="form.permissions.length > 0 && !form.permissions.includes('gemini')"
+                    :groups="[]"
+                    placeholder="请选择组内优先Gemini账号"
+                    platform="gemini"
+                  />
+                </div>
               </div>
               <div>
                 <label class="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-400"
@@ -770,6 +798,20 @@
                   placeholder="请选择OpenAI账号"
                   platform="openai"
                 />
+                <div v-if="isGroupBinding(form.openaiAccountId)" class="mt-2">
+                  <label class="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400"
+                    >组内优先账号</label
+                  >
+                  <AccountSelector
+                    v-model="form.preferredOpenaiAccountId"
+                    :accounts="preferredOpenAIAccounts"
+                    default-option-text="不指定，按分组优先级调度"
+                    :disabled="form.permissions.length > 0 && !form.permissions.includes('openai')"
+                    :groups="[]"
+                    placeholder="请选择组内优先OpenAI账号"
+                    platform="openai"
+                  />
+                </div>
               </div>
               <div>
                 <label class="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-400"
@@ -798,10 +840,27 @@
                   placeholder="请选择Droid账号"
                   platform="droid"
                 />
+                <div v-if="isGroupBinding(form.droidAccountId)" class="mt-2">
+                  <label class="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400"
+                    >组内优先账号</label
+                  >
+                  <AccountSelector
+                    v-model="form.preferredDroidAccountId"
+                    :accounts="preferredDroidAccounts"
+                    default-option-text="不指定，按分组优先级调度"
+                    :disabled="form.permissions.length > 0 && !form.permissions.includes('droid')"
+                    :groups="[]"
+                    placeholder="请选择组内优先Droid账号"
+                    platform="droid"
+                  />
+                </div>
               </div>
             </div>
             <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
               选择专属账号后，此API Key将只使用该账号，不选择则使用共享账号池
+            </p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              绑定分组时可指定组内优先账号；优先账号不可用、模型不匹配或不在分组内时会自动回退分组调度。
             </p>
           </div>
 
@@ -975,7 +1034,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { showToast } from '@/utils/tools'
 import { useClientsStore } from '@/stores/clients'
 import { useApiKeysStore } from '@/stores/apiKeys'
@@ -992,6 +1051,7 @@ const props = defineProps({
       openai: [],
       bedrock: [],
       droid: [],
+      openaiResponses: [],
       claudeGroups: [],
       geminiGroups: [],
       openaiGroups: [],
@@ -1107,8 +1167,12 @@ const form = reactive({
   claudeAccountId: '',
   geminiAccountId: '',
   openaiAccountId: '',
+  preferredClaudeAccountId: '',
+  preferredGeminiAccountId: '',
+  preferredOpenaiAccountId: '',
   bedrockAccountId: '',
   droidAccountId: '',
+  preferredDroidAccountId: '',
   enableModelRestriction: false,
   restrictedModels: [],
   modelInput: '',
@@ -1116,6 +1180,82 @@ const form = reactive({
   allowedClients: [],
   tags: []
 })
+
+const isGroupBinding = (binding) => typeof binding === 'string' && binding.startsWith('group:')
+const getGroupIdFromBinding = (binding) => (isGroupBinding(binding) ? binding.substring(6) : '')
+
+const accountBelongsToGroup = (account, groupId) =>
+  Array.isArray(account?.groupInfos) && account.groupInfos.some((group) => group.id === groupId)
+
+const getAccountsInBoundGroup = (accounts, binding) => {
+  const groupId = getGroupIdFromBinding(binding)
+  if (!groupId) return []
+  return accounts.filter((account) => accountBelongsToGroup(account, groupId))
+}
+
+const isPreferredStillAvailable = (preferredValue, accounts) => {
+  if (!preferredValue) return true
+  const normalizedPreferred = preferredValue.replace(/^(console:|responses:|api:)/, '')
+  return accounts.some((account) => account.id === normalizedPreferred)
+}
+
+const preferredClaudeAccounts = computed(() =>
+  getAccountsInBoundGroup(localAccounts.value.claude, form.claudeAccountId)
+)
+const preferredGeminiAccounts = computed(() =>
+  getAccountsInBoundGroup(localAccounts.value.gemini, form.geminiAccountId)
+)
+const preferredOpenAIAccounts = computed(() =>
+  getAccountsInBoundGroup(localAccounts.value.openai, form.openaiAccountId)
+)
+const preferredDroidAccounts = computed(() =>
+  getAccountsInBoundGroup(localAccounts.value.droid, form.droidAccountId)
+)
+
+watch(
+  () => [form.claudeAccountId, preferredClaudeAccounts.value],
+  () => {
+    if (
+      !isGroupBinding(form.claudeAccountId) ||
+      !isPreferredStillAvailable(form.preferredClaudeAccountId, preferredClaudeAccounts.value)
+    ) {
+      form.preferredClaudeAccountId = ''
+    }
+  }
+)
+watch(
+  () => [form.geminiAccountId, preferredGeminiAccounts.value],
+  () => {
+    if (
+      !isGroupBinding(form.geminiAccountId) ||
+      !isPreferredStillAvailable(form.preferredGeminiAccountId, preferredGeminiAccounts.value)
+    ) {
+      form.preferredGeminiAccountId = ''
+    }
+  }
+)
+watch(
+  () => [form.openaiAccountId, preferredOpenAIAccounts.value],
+  () => {
+    if (
+      !isGroupBinding(form.openaiAccountId) ||
+      !isPreferredStillAvailable(form.preferredOpenaiAccountId, preferredOpenAIAccounts.value)
+    ) {
+      form.preferredOpenaiAccountId = ''
+    }
+  }
+)
+watch(
+  () => [form.droidAccountId, preferredDroidAccounts.value],
+  () => {
+    if (
+      !isGroupBinding(form.droidAccountId) ||
+      !isPreferredStillAvailable(form.preferredDroidAccountId, preferredDroidAccounts.value)
+    ) {
+      form.preferredDroidAccountId = ''
+    }
+  }
+)
 
 // 更新权限（数组格式，空数组=全部服务）
 const updatePermissions = () => {
@@ -1559,15 +1699,24 @@ const createApiKey = async () => {
         delete baseData.claudeConsoleAccountId
       }
     }
+    if (isGroupBinding(form.claudeAccountId) && form.preferredClaudeAccountId) {
+      baseData.preferredClaudeAccountId = form.preferredClaudeAccountId
+    }
 
     // Gemini账户绑定
     if (form.geminiAccountId) {
       baseData.geminiAccountId = form.geminiAccountId
     }
+    if (isGroupBinding(form.geminiAccountId) && form.preferredGeminiAccountId) {
+      baseData.preferredGeminiAccountId = form.preferredGeminiAccountId
+    }
 
     // OpenAI账户绑定
     if (form.openaiAccountId) {
       baseData.openaiAccountId = form.openaiAccountId
+    }
+    if (isGroupBinding(form.openaiAccountId) && form.preferredOpenaiAccountId) {
+      baseData.preferredOpenaiAccountId = form.preferredOpenaiAccountId
     }
 
     // Bedrock账户绑定
@@ -1576,6 +1725,9 @@ const createApiKey = async () => {
     }
     if (form.droidAccountId) {
       baseData.droidAccountId = form.droidAccountId
+    }
+    if (isGroupBinding(form.droidAccountId) && form.preferredDroidAccountId) {
+      baseData.preferredDroidAccountId = form.preferredDroidAccountId
     }
 
     if (form.createType === 'single') {

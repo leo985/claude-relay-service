@@ -156,6 +156,52 @@ describe('OpenAITokenImageRelayService', () => {
     expect(mockUpdateAccountUsage).toHaveBeenCalledWith('tok-1', expect.any(Number))
   })
 
+  test('parses image_generation_call result from response.completed', async () => {
+    const completed = {
+      type: 'response.completed',
+      data: {
+        type: 'response.completed',
+        response: {
+          model: 'gpt-5.4',
+          output: [{ type: 'image_generation_call', status: 'completed', result: 'NEWFORMAT' }]
+        }
+      }
+    }
+    axios.mockResolvedValueOnce({
+      status: 200,
+      headers: {},
+      data: createSseStream([completed])
+    })
+
+    const req = createReq()
+    const res = createRes()
+    await relay.handleGenerations(req, res, account, req.apiKey, 'decrypted-token')
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.payload.data).toEqual([{ b64_json: 'NEWFORMAT' }])
+  })
+
+  test('parses a completed image call from the final SSE frame without a trailing separator', async () => {
+    const { Readable } = require('stream')
+    const stream = new Readable({ read() {} })
+    const completed = {
+      type: 'response.image_generation_call.completed',
+      item: { type: 'image_generation_call', result: 'EVENTFORMAT' }
+    }
+    process.nextTick(() => {
+      stream.push(`data: ${JSON.stringify(completed)}`)
+      stream.push(null)
+    })
+    axios.mockResolvedValueOnce({ status: 200, headers: {}, data: stream })
+
+    const req = createReq()
+    const res = createRes()
+    await relay.handleGenerations(req, res, account, req.apiKey, 'decrypted-token')
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.payload.data).toEqual([{ b64_json: 'EVENTFORMAT' }])
+  })
+
   test('rejects n>1 with 400 (MVP supports only n=1)', async () => {
     const req = createReq({ body: { prompt: 'a corgi', n: 3 } })
     const res = createRes()
@@ -247,7 +293,7 @@ describe('OpenAITokenImageRelayService', () => {
     })
   })
 
-  test('marks account temp-unavailable on 429 and forwards sanitized error', async () => {
+  test('marks account temp-unavailable on 429 and returns 503 to clients', async () => {
     const { Readable } = require('stream')
     const errStream = new Readable({ read() {} })
     process.nextTick(() => {
@@ -261,7 +307,7 @@ describe('OpenAITokenImageRelayService', () => {
 
     await relay.handleGenerations(req, res, account, req.apiKey, 'decrypted-token')
 
-    expect(res.status).toHaveBeenCalledWith(429)
+    expect(res.status).toHaveBeenCalledWith(503)
     expect(mockMarkTempUnavailable).toHaveBeenCalledWith('tok-1', 'openai', 429, null)
   })
 })

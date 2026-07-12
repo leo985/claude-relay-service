@@ -1557,6 +1557,40 @@ class DroidAccountService {
       throw error
     }
   }
+
+  async markAccountRateLimited(accountId, duration = null) {
+    const account = await this.getAccount(accountId)
+    if (!account) {
+      throw new Error('Account not found')
+    }
+    if (account.disableAutoProtection === true || account.disableAutoProtection === 'true') {
+      await upstreamErrorHelper
+        .recordErrorHistory(accountId, 'droid', 429, 'rate_limit')
+        .catch(() => {})
+      return { success: true, skipped: true }
+    }
+
+    const durationMinutes = duration || parseInt(account.rateLimitDuration, 10) || 60
+    const now = new Date()
+    const resetAt = new Date(now.getTime() + durationMinutes * 60 * 1000)
+    await this.updateAccount(accountId, {
+      status: 'rateLimited',
+      errorMessage: `Rate limited until ${resetAt.toISOString()}`,
+      rateLimitedAt: now.toISOString(),
+      rateLimitStatus: 'limited',
+      rateLimitResetAt: resetAt.toISOString(),
+      rateLimitDuration: String(durationMinutes),
+      schedulable: 'false'
+    })
+    logger.warn(
+      `Droid account ${account.name} marked as rate limited until ${resetAt.toISOString()}`
+    )
+    return {
+      success: true,
+      rateLimitedAt: now.toISOString(),
+      rateLimitResetAt: resetAt.toISOString()
+    }
+  }
 }
 
 // 导出单例

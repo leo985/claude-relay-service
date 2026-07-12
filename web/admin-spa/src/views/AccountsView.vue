@@ -113,6 +113,18 @@
               </el-tooltip>
             </div>
 
+            <div v-if="hasLatestAccountTestResults" class="relative">
+              <el-tooltip content="查看最近一次全量测试结果" effect="dark" placement="bottom">
+                <button
+                  class="flex items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+                  @click="openLatestBatchTestResults"
+                >
+                  <i class="fas fa-clipboard-check text-emerald-500" />
+                  <span>查看结果</span>
+                </button>
+              </el-tooltip>
+            </div>
+
             <!-- 刷新按钮 -->
             <div class="relative">
               <el-tooltip
@@ -159,6 +171,35 @@
                     ]"
                   />
                   <span class="relative">刷新余额</span>
+                </button>
+              </el-tooltip>
+            </div>
+
+            <!-- 全账号多 Agent 测试按钮 -->
+            <div class="relative">
+              <el-tooltip
+                :content="
+                  batchTestRunning ? '查看当前全量测试进度' : '一键测试所有支持的账号与兼容 Agent'
+                "
+                effect="dark"
+                placement="bottom"
+              >
+                <button
+                  class="group relative flex items-center justify-center gap-2 rounded-lg border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-medium text-cyan-700 shadow-sm transition-all duration-200 hover:border-cyan-300 hover:bg-cyan-100 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 dark:border-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300 dark:hover:bg-cyan-900/50 sm:w-auto"
+                  @click="startBatchAccountTests"
+                >
+                  <div
+                    class="absolute -inset-0.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 opacity-0 blur transition duration-300 group-hover:opacity-20"
+                  ></div>
+                  <i
+                    :class="[
+                      'fas relative text-cyan-600 dark:text-cyan-300',
+                      batchTestRunning ? 'fa-spinner fa-spin' : 'fa-vials'
+                    ]"
+                  />
+                  <span class="relative">
+                    {{ batchTestRunning ? `测试 ${batchTestProgressPercent}%` : '全量测试' }}
+                  </span>
                 </button>
               </el-tooltip>
             </div>
@@ -297,9 +338,20 @@
                   <i v-else class="fas fa-sort ml-1 text-gray-400" />
                 </th>
                 <th
-                  class="min-w-[150px] px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-gray-300"
+                  class="min-w-[150px] cursor-pointer px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-600"
+                  title="点击按今日使用次数排序"
+                  @click="sortAccounts('dailyRequests')"
                 >
                   今日使用
+                  <i
+                    v-if="accountsSortBy === 'dailyRequests'"
+                    :class="[
+                      'fas',
+                      accountsSortOrder === 'asc' ? 'fa-sort-up' : 'fa-sort-down',
+                      'ml-1'
+                    ]"
+                  />
+                  <i v-else class="fas fa-sort ml-1 text-gray-400" />
                 </th>
                 <th
                   class="min-w-[220px] px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-gray-300"
@@ -528,6 +580,18 @@
                           <i class="fas fa-share-alt mr-1" />共享
                         </span>
                       </div>
+                      <button
+                        v-if="getLatestAccountTestResult(account)"
+                        :class="[
+                          'mt-2 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition',
+                          getLatestAccountTestResultClass(account)
+                        ]"
+                        type="button"
+                        @click.stop="openAccountLatestTestResult(account)"
+                      >
+                        <i :class="['fas', getLatestAccountTestResultIcon(account)]" />
+                        {{ getLatestAccountTestResultText(account) }}
+                      </button>
                       <!-- 显示所有分组 - 换行显示 -->
                       <div
                         v-if="account.groupInfos && account.groupInfos.length > 0"
@@ -848,7 +912,7 @@
                     <div class="flex items-center gap-2">
                       <div class="h-2 w-2 rounded-full bg-blue-500" />
                       <span class="text-sm font-medium text-gray-900 dark:text-gray-100"
-                        >{{ account.usage.daily.requests || 0 }} 次</span
+                        >{{ getAccountTodayUsageCount(account) }} 次</span
                       >
                     </div>
                     <div class="flex items-center gap-2">
@@ -1517,6 +1581,18 @@
                   <span class="text-xs text-gray-400">|</span>
                   <span class="text-xs text-gray-500 dark:text-gray-400">{{ account.type }}</span>
                 </div>
+                <button
+                  v-if="getLatestAccountTestResult(account)"
+                  :class="[
+                    'mt-2 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium',
+                    getLatestAccountTestResultClass(account)
+                  ]"
+                  type="button"
+                  @click.stop="openAccountLatestTestResult(account)"
+                >
+                  <i :class="['fas', getLatestAccountTestResultIcon(account)]" />
+                  {{ getLatestAccountTestResultText(account) }}
+                </button>
               </div>
             </div>
             <span
@@ -1540,7 +1616,7 @@
                 <div class="flex items-center gap-1.5">
                   <div class="h-1.5 w-1.5 rounded-full bg-blue-500" />
                   <p class="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                    {{ account.usage?.daily?.requests || 0 }} 次
+                    {{ getAccountTodayUsageCount(account) }} 次
                   </p>
                 </div>
                 <div class="flex items-center gap-1.5">
@@ -2119,6 +2195,7 @@
       mode="account"
       :show="showAccountTestModal"
       @close="closeAccountTestModal"
+      @tested="handleAccountTested"
     />
 
     <!-- 定时测试配置弹窗 -->
@@ -2135,6 +2212,160 @@
       @close="closeBalanceScriptModal"
       @saved="handleBalanceScriptSaved"
     />
+
+    <!-- 全账号多 Agent 测试结果 -->
+    <el-dialog v-model="showBatchTestModal" title="全账号多 Agent 测试" width="92%">
+      <div class="space-y-4">
+        <div
+          v-if="batchTestRunning"
+          class="rounded-lg border border-cyan-200 bg-cyan-50 p-4 dark:border-cyan-800 dark:bg-cyan-900/20"
+        >
+          <div class="flex flex-wrap items-center justify-between gap-2 text-sm">
+            <div class="font-medium text-cyan-800 dark:text-cyan-200">
+              <i class="fas fa-spinner fa-spin mr-2" />
+              {{ batchTestPhaseText }}
+            </div>
+            <div class="tabular-nums text-cyan-700 dark:text-cyan-300">
+              {{ batchTestCompletedCount }} / {{ batchTestResult?.testCount || 0 }} 项
+              <span class="ml-2 font-semibold">{{ batchTestProgressPercent }}%</span>
+            </div>
+          </div>
+          <div class="mt-3 h-2 overflow-hidden rounded-full bg-cyan-100 dark:bg-cyan-950">
+            <div
+              v-if="(batchTestResult?.testCount || 0) > 0"
+              class="h-full rounded-full bg-cyan-500 transition-all duration-300"
+              :style="{ width: `${batchTestProgressPercent}%` }"
+            ></div>
+            <div v-else class="h-full w-1/3 animate-pulse rounded-full bg-cyan-400"></div>
+          </div>
+          <div
+            v-if="batchCurrentTests.length > 0"
+            class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-cyan-700 dark:text-cyan-300"
+          >
+            <span v-for="item in batchCurrentTests" :key="`${item.accountId}:${item.agent}`">
+              <i class="fas fa-angle-right mr-1" />
+              {{ item.accountName || item.accountId }} · {{ item.agentLabel || item.agent }}
+            </span>
+          </div>
+          <p class="mt-2 text-xs text-cyan-600 dark:text-cyan-400">
+            测试会产生真实上游请求；关闭弹窗不会中断任务。
+          </p>
+        </div>
+
+        <div v-if="batchTestResult" class="grid gap-3 sm:grid-cols-5">
+          <div class="rounded-xl bg-gray-50 p-3 dark:bg-gray-800">
+            <div class="text-xs text-gray-500">账号</div>
+            <div class="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">
+              {{ batchTestResult.accountCount }}
+            </div>
+          </div>
+          <div class="rounded-xl bg-gray-50 p-3 dark:bg-gray-800">
+            <div class="text-xs text-gray-500">测试项</div>
+            <div class="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">
+              {{ batchTestResult.testCount }}
+            </div>
+          </div>
+          <div class="rounded-xl bg-green-50 p-3 dark:bg-green-900/20">
+            <div class="text-xs text-green-600 dark:text-green-300">成功</div>
+            <div class="mt-1 text-xl font-semibold text-green-700 dark:text-green-200">
+              {{ batchTestResult.successCount }}
+            </div>
+          </div>
+          <div class="rounded-xl bg-red-50 p-3 dark:bg-red-900/20">
+            <div class="text-xs text-red-600 dark:text-red-300">失败</div>
+            <div class="mt-1 text-xl font-semibold text-red-700 dark:text-red-200">
+              {{ batchTestResult.failedCount }}
+            </div>
+          </div>
+          <div class="rounded-xl bg-amber-50 p-3 dark:bg-amber-900/20">
+            <div class="text-xs text-amber-600 dark:text-amber-300">429</div>
+            <div class="mt-1 text-xl font-semibold text-amber-700 dark:text-amber-200">
+              {{ batchTestResult.rateLimitedCount }}
+            </div>
+          </div>
+        </div>
+
+        <div
+          v-if="batchFlatResults.length > 0"
+          class="max-h-[60vh] overflow-auto rounded-xl border border-gray-200 dark:border-gray-700"
+        >
+          <table class="w-full min-w-[920px] text-sm">
+            <thead class="sticky top-0 bg-gray-100 dark:bg-gray-800">
+              <tr>
+                <th class="px-3 py-2 text-left">平台</th>
+                <th class="px-3 py-2 text-left">账号</th>
+                <th class="px-3 py-2 text-left">Agent</th>
+                <th class="px-3 py-2 text-left">模型</th>
+                <th class="px-3 py-2 text-center">状态</th>
+                <th class="px-3 py-2 text-left">结果</th>
+                <th class="px-3 py-2 text-left">限流处理</th>
+                <th class="px-3 py-2 text-left">测试时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="item in batchFlatResults"
+                :key="`${item.platform}:${item.accountId}:${item.agent}:${item.model}`"
+                class="border-t border-gray-100 dark:border-gray-700"
+              >
+                <td class="px-3 py-2">{{ getPlatformLabel(item.platform) }}</td>
+                <td class="px-3 py-2">
+                  <div class="font-medium text-gray-900 dark:text-gray-100">
+                    {{ item.accountName || item.accountId }}
+                  </div>
+                  <div class="text-xs text-gray-400">{{ item.accountId }}</div>
+                </td>
+                <td class="px-3 py-2">{{ item.agentLabel || item.agent }}</td>
+                <td class="max-w-[220px] truncate px-3 py-2" :title="item.model">
+                  {{ item.model || '-' }}
+                </td>
+                <td class="px-3 py-2 text-center">
+                  <span
+                    :class="[
+                      'rounded-full px-2 py-0.5 text-xs font-medium',
+                      item.success
+                        ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
+                        : item.statusCode === 429
+                          ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+                          : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+                    ]"
+                  >
+                    HTTP {{ item.statusCode || '-' }}
+                  </span>
+                </td>
+                <td class="max-w-[260px] px-3 py-2">
+                  <div class="truncate" :title="item.success ? item.responseText : item.error">
+                    {{ item.success ? item.responseText || 'OK' : item.error || '测试失败' }}
+                  </div>
+                  <div class="text-xs text-gray-400">{{ item.latency || 0 }}ms</div>
+                </td>
+                <td class="px-3 py-2">
+                  <span v-if="item.statusCode !== 429" class="text-gray-400">-</span>
+                  <span
+                    v-else-if="item.rateLimitedMarked"
+                    class="text-amber-700 dark:text-amber-300"
+                  >
+                    已标记
+                  </span>
+                  <span v-else class="text-gray-500">
+                    {{ formatRateLimitMarkReason(item.rateLimitMarkReason) }}
+                  </span>
+                </td>
+                <td class="whitespace-nowrap px-3 py-2 text-xs text-gray-500">
+                  {{ formatTestedAt(item.testedAt) }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div
+          v-else-if="batchTestResult && !batchTestRunning"
+          class="rounded-xl border border-dashed border-gray-300 px-4 py-10 text-center text-sm text-gray-500 dark:border-gray-700 dark:text-gray-400"
+        >
+          暂无可展示的账号测试结果
+        </div>
+      </div>
+    </el-dialog>
 
     <!-- 账户统计弹窗 -->
     <el-dialog
@@ -2441,6 +2672,16 @@ const expiryEditModalRef = ref(null)
 const showAccountTestModal = ref(false)
 const testingAccount = ref(null)
 
+// 全账号多 Agent 测试状态
+const showBatchTestModal = ref(false)
+const batchTestRunning = ref(false)
+const batchTestResult = ref(null)
+const batchTestJobId = ref('')
+const latestAccountTestResults = ref({})
+const latestBatchTestResult = ref(null)
+let batchTestPollTimer = null
+let batchTestPollFailures = 0
+
 // 定时测试配置弹窗状态
 const showScheduledTestModal = ref(false)
 const scheduledTestAccount = ref(null)
@@ -2466,7 +2707,7 @@ const accountGroupMap = ref(new Map()) // Map<accountId, Array<groupInfo>>
 const sortOptions = ref([
   { value: 'name', label: '按名称排序', icon: 'fa-font' },
   { value: 'dailyTokens', label: '按今日Token排序', icon: 'fa-coins' },
-  { value: 'dailyRequests', label: '按今日请求数排序', icon: 'fa-chart-line' },
+  { value: 'dailyRequests', label: '按今日使用次数排序', icon: 'fa-chart-line' },
   { value: 'totalTokens', label: '按总Token排序', icon: 'fa-database' },
   { value: 'lastUsed', label: '按最后使用排序', icon: 'fa-clock' },
   { value: 'rateLimitTime', label: '按限流时间排序', icon: 'fa-hourglass' }
@@ -2797,8 +3038,10 @@ const supportedTestPlatforms = [
   'bedrock',
   'gemini',
   'gemini-api',
+  'openai',
   'openai-responses',
   'azure-openai',
+  'azure_openai',
   'droid',
   'ccr'
 ]
@@ -2819,6 +3062,313 @@ const openAccountTestModal = (account) => {
 const closeAccountTestModal = () => {
   showAccountTestModal.value = false
   testingAccount.value = null
+}
+
+const handleAccountTested = (result) => {
+  if (result?.accountId && result?.platform) {
+    storeLatestAccountTestGroups([
+      {
+        accountId: result.accountId,
+        accountName: result.accountName || result.accountId,
+        platform: result.platform,
+        tests: [result],
+        testedAt: result.testedAt
+      }
+    ])
+  }
+  if (result?.statusCode === 429 || result?.rateLimitedMarked) {
+    loadAccounts(true)
+  }
+}
+
+const normalizeAccountTestPlatform = (platform) => {
+  if (platform === 'azure_openai') return 'azure-openai'
+  if (platform === 'openai_responses') return 'openai-responses'
+  return platform || ''
+}
+
+const getAccountTestResultKey = (platform, accountId) =>
+  `${normalizeAccountTestPlatform(platform)}:${accountId}`
+
+const storeLatestAccountTestGroups = (groups = []) => {
+  const next = { ...latestAccountTestResults.value }
+  groups.forEach((group) => {
+    if (!group?.accountId || !group?.platform) return
+    next[getAccountTestResultKey(group.platform, group.accountId)] = group
+  })
+  latestAccountTestResults.value = next
+}
+
+const loadLatestAccountTestResults = async () => {
+  try {
+    const response = await httpApis.getLatestAccountTestResultsApi()
+    if (!response?.success) return
+    latestAccountTestResults.value = {}
+    storeLatestAccountTestGroups(Array.isArray(response.data) ? response.data : [])
+  } catch {
+    // 最近测试结果不可用时不阻断账号列表。
+  }
+}
+
+const loadLatestBatchTestResult = async () => {
+  try {
+    const response = await httpApis.getLatestBatchAccountTestResultApi()
+    if (response?.success) {
+      latestBatchTestResult.value = response.data || null
+    }
+  } catch {
+    // 最近批次不可用时不阻断账号列表。
+  }
+}
+
+const getLatestAccountTestResult = (account) =>
+  latestAccountTestResults.value[getAccountTestResultKey(account?.platform, account?.id)] || null
+
+const hasLatestAccountTestResults = computed(() => !!latestBatchTestResult.value)
+
+const getLatestAccountTestResultSummary = (account) => {
+  const group = getLatestAccountTestResult(account)
+  const tests = group?.tests || []
+  return {
+    group,
+    total: tests.length,
+    success: tests.filter((test) => test.success).length,
+    rateLimited: tests.filter((test) => test.statusCode === 429).length
+  }
+}
+
+const getLatestAccountTestResultText = (account) => {
+  const { total, success, rateLimited } = getLatestAccountTestResultSummary(account)
+  if (rateLimited > 0) return `最近测试 ${success}/${total} · ${rateLimited} 个限流`
+  return `最近测试 ${success}/${total}`
+}
+
+const getLatestAccountTestResultClass = (account) => {
+  const { total, success, rateLimited } = getLatestAccountTestResultSummary(account)
+  if (rateLimited > 0) {
+    return 'bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-300'
+  }
+  if (total > 0 && success === total) {
+    return 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300'
+  }
+  return 'bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-300'
+}
+
+const getLatestAccountTestResultIcon = (account) => {
+  const { total, success, rateLimited } = getLatestAccountTestResultSummary(account)
+  if (rateLimited > 0) return 'fa-hourglass-half'
+  return total > 0 && success === total ? 'fa-check-circle' : 'fa-times-circle'
+}
+
+const buildBatchResultFromGroups = (groups = []) => {
+  const tests = groups.flatMap((group) => group.tests || [])
+  return {
+    accountCount: groups.length,
+    testCount: tests.length,
+    successCount: tests.filter((test) => test.success).length,
+    failedCount: tests.filter((test) => !test.success).length,
+    rateLimitedCount: tests.filter((test) => test.statusCode === 429).length,
+    results: groups
+  }
+}
+
+const openLatestBatchTestResults = () => {
+  if (batchTestRunning.value) {
+    showBatchTestModal.value = true
+    return
+  }
+  batchTestResult.value = latestBatchTestResult.value
+  showBatchTestModal.value = true
+}
+
+const openAccountLatestTestResult = (account) => {
+  const group = getLatestAccountTestResult(account)
+  if (!group) return
+  batchTestResult.value = buildBatchResultFromGroups([group])
+  showBatchTestModal.value = true
+}
+
+const formatTestedAt = (value) => {
+  if (!value) return '-'
+  return new Date(value).toLocaleString('zh-CN', { hour12: false })
+}
+
+const batchFlatResults = computed(() => {
+  const groups = batchTestResult.value?.results || []
+  return groups.flatMap((group) =>
+    (group.tests || []).map((test) => ({
+      ...test,
+      platform: group.platform || test.platform,
+      accountId: group.accountId || test.accountId,
+      accountName: group.accountName || test.accountName
+    }))
+  )
+})
+
+const getPlatformLabel = (platform) => {
+  const normalized = platform === 'azure-openai' ? 'azure_openai' : platform
+  for (const group of platformHierarchy) {
+    const match = group.children?.find((child) => child.value === normalized)
+    if (match) return match.label
+  }
+  return platform || '未知平台'
+}
+
+const formatRateLimitMarkReason = (reason) => {
+  const labels = {
+    auto_protection_disabled: '自动防护已关闭',
+    mark_failed: '标记失败',
+    rate_limit_disabled: '限流标记已禁用',
+    unsupported_platform: '平台不支持'
+  }
+  return labels[reason] || reason || '未标记'
+}
+
+const batchTestCompletedCount = computed(() => Number(batchTestResult.value?.completedCount) || 0)
+
+const batchTestProgressPercent = computed(() => {
+  const explicit = Number(batchTestResult.value?.progressPercent)
+  if (Number.isFinite(explicit)) return Math.min(100, Math.max(0, explicit))
+  const total = Number(batchTestResult.value?.testCount) || 0
+  return total > 0 ? Math.round((batchTestCompletedCount.value / total) * 100) : 0
+})
+
+const batchCurrentTests = computed(() => batchTestResult.value?.currentTests || [])
+
+const batchTestPhaseText = computed(() => {
+  if (batchTestResult.value?.phase === 'discovering') return '正在读取可测试账号'
+  if (batchCurrentTests.value.length > 0) return '正在调用上游进行测试'
+  return '正在准备下一批测试'
+})
+
+const applyBatchTestJob = (job) => {
+  batchTestRunning.value = job.status === 'running'
+  batchTestResult.value = {
+    ...(job.result || {}),
+    accountCount: job.accountCount || 0,
+    testCount: job.testCount || 0,
+    completedCount: job.completedCount || 0,
+    successCount: job.successCount || 0,
+    failedCount: job.failedCount || 0,
+    rateLimitedCount: job.rateLimitedCount || 0,
+    progressPercent: job.progressPercent || 0,
+    currentTests: job.currentTests || [],
+    results: job.result?.results || job.results || [],
+    phase: job.phase,
+    status: job.status,
+    error: job.error || ''
+  }
+}
+
+const clearBatchTestPollTimer = () => {
+  if (batchTestPollTimer) {
+    clearTimeout(batchTestPollTimer)
+    batchTestPollTimer = null
+  }
+}
+
+const scheduleBatchTestPoll = (jobId, delay = 700) => {
+  clearBatchTestPollTimer()
+  batchTestPollTimer = setTimeout(() => pollBatchTestJob(jobId), delay)
+}
+
+const pollBatchTestJob = async (jobId) => {
+  if (!jobId || batchTestJobId.value !== jobId) return
+
+  try {
+    const response = await httpApis.getBatchAccountTestJobApi(jobId)
+    if (!response?.success || !response.data) {
+      throw new Error(response?.message || '无法读取全量测试进度')
+    }
+
+    batchTestPollFailures = 0
+    const job = response.data
+    applyBatchTestJob(job)
+
+    if (job.status === 'running') {
+      scheduleBatchTestPoll(jobId)
+      return
+    }
+
+    batchTestJobId.value = ''
+    clearBatchTestPollTimer()
+    if (job.status === 'completed') {
+      storeLatestAccountTestGroups(batchTestResult.value.results || [])
+      latestBatchTestResult.value = { ...batchTestResult.value }
+      const failed = batchTestResult.value.failedCount || 0
+      const total = batchTestResult.value.testCount || 0
+      showToast(
+        failed > 0 ? `全量测试完成：${failed}/${total} 项失败` : `全量测试完成：${total} 项通过`,
+        failed > 0 ? 'warning' : 'success'
+      )
+      await loadAccounts(true)
+    } else {
+      showToast(job.error || '全量测试失败', 'error')
+    }
+  } catch (error) {
+    batchTestPollFailures += 1
+    if (batchTestPollFailures <= 3 && batchTestJobId.value === jobId) {
+      scheduleBatchTestPoll(jobId, 1200)
+      return
+    }
+    batchTestRunning.value = false
+    batchTestJobId.value = ''
+    clearBatchTestPollTimer()
+    showToast(error.message || '读取全量测试进度失败', 'error')
+  }
+}
+
+const startBatchAccountTests = async () => {
+  if (batchTestRunning.value) {
+    showBatchTestModal.value = true
+    return
+  }
+
+  const confirmed = await showConfirm(
+    '全账号多 Agent 测试',
+    '将对所有支持的账号按兼容 Agent 发起真实上游测试请求，可能消耗额度并触发限流标记。是否继续？',
+    '开始测试',
+    '取消'
+  )
+  if (!confirmed) return
+
+  showBatchTestModal.value = true
+  batchTestRunning.value = true
+  batchTestResult.value = {
+    accountCount: 0,
+    testCount: 0,
+    completedCount: 0,
+    successCount: 0,
+    failedCount: 0,
+    rateLimitedCount: 0,
+    progressPercent: 0,
+    currentTests: [],
+    results: [],
+    phase: 'discovering',
+    status: 'running'
+  }
+
+  try {
+    const response = await httpApis.startBatchAccountTestsApi({
+      prompt: 'Reply with OK only.',
+      maxTokens: 32
+    })
+    if (response?.success && response.data) {
+      batchTestJobId.value = response.data.id
+      batchTestPollFailures = 0
+      applyBatchTestJob(response.data)
+      if (response.data.reused) {
+        showToast('已连接到正在执行的全量测试', 'info')
+      }
+      scheduleBatchTestPoll(response.data.id, 200)
+    } else {
+      showToast(response?.message || '全量测试失败', 'error')
+      batchTestRunning.value = false
+    }
+  } catch (error) {
+    batchTestRunning.value = false
+    showToast(error.message || '启动全量测试失败', 'error')
+  }
 }
 
 // 定时测试配置相关函数
@@ -2852,6 +3402,11 @@ const openBalanceScriptModal = (account) => {
 const closeBalanceScriptModal = () => {
   showBalanceScriptModal.value = false
   selectedAccountForScript.value = null
+}
+
+const getAccountTodayUsageCount = (account) => {
+  const count = Number(account?.usage?.daily?.requests)
+  return Number.isFinite(count) && count >= 0 ? count : 0
 }
 
 const handleBalanceScriptSaved = async () => {
@@ -2927,8 +3482,8 @@ const sortedAccounts = computed(() => {
       aVal = a.usage?.daily?.allTokens || 0
       bVal = b.usage?.daily?.allTokens || 0
     } else if (accountsSortBy.value === 'dailyRequests') {
-      aVal = a.usage?.daily?.requests || 0
-      bVal = b.usage?.daily?.requests || 0
+      aVal = getAccountTodayUsageCount(a)
+      bVal = getAccountTodayUsageCount(b)
     } else if (accountsSortBy.value === 'totalTokens') {
       aVal = a.usage?.total?.allTokens || 0
       bVal = b.usage?.total?.allTokens || 0
@@ -3357,7 +3912,12 @@ const loadAccounts = async (forceReload = false) => {
     const platformsToFetch = getPlatformsForFilter(platformFilter.value)
 
     // 使用缓存机制加载绑定计数和分组数据（不再加载完整的 API Keys 数据）
-    await Promise.all([loadBindingCounts(forceReload), loadAccountGroups(forceReload)])
+    await Promise.all([
+      loadBindingCounts(forceReload),
+      loadAccountGroups(forceReload),
+      loadLatestAccountTestResults(),
+      loadLatestBatchTestResult()
+    ])
 
     // 后端账户API已经包含分组信息，不需要单独加载分组成员关系
     // await loadGroupMembers(forceReload)
@@ -3578,6 +4138,8 @@ const loadClaudeUsage = async () => {
 // 记录上一次的排序字段，用于判断下拉选择是否是同一字段被再次选择
 let lastDropdownSortField = 'name'
 
+const getDefaultSortOrder = (field) => (field === 'dailyRequests' ? 'desc' : 'asc')
+
 // 排序账户（表头点击使用）
 const sortAccounts = (field) => {
   if (field) {
@@ -3585,7 +4147,7 @@ const sortAccounts = (field) => {
       accountsSortOrder.value = accountsSortOrder.value === 'asc' ? 'desc' : 'asc'
     } else {
       accountsSortBy.value = field
-      accountsSortOrder.value = 'asc'
+      accountsSortOrder.value = getDefaultSortOrder(field)
     }
     // 同步下拉选择器的状态记录
     lastDropdownSortField = field
@@ -3598,8 +4160,8 @@ const handleDropdownSort = (field) => {
     // 选择同一字段，切换排序方向
     accountsSortOrder.value = accountsSortOrder.value === 'asc' ? 'desc' : 'asc'
   } else {
-    // 选择不同字段，重置为升序
-    accountsSortOrder.value = 'asc'
+    // 今日使用次数默认从高到低，其他字段保持原有升序行为
+    accountsSortOrder.value = getDefaultSortOrder(field)
   }
   lastDropdownSortField = field
 }
@@ -5319,6 +5881,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  clearBatchTestPollTimer()
   if (resizeObserver) {
     resizeObserver.disconnect()
   }

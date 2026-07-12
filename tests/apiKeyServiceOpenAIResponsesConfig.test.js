@@ -89,10 +89,12 @@ describe('apiKeyService openai responses config', () => {
     expect(storedKeyData.enableOpenAIResponsesCodexAdaptation).toBe('true')
     expect(storedKeyData.enableOpenAIResponsesPayloadRules).toBe('false')
     expect(storedKeyData.openaiResponsesPayloadRules).toBe('[]')
+    expect(storedKeyData.preferredOpenaiAccountId).toBe('')
 
     expect(result.enableOpenAIResponsesCodexAdaptation).toBe(true)
     expect(result.enableOpenAIResponsesPayloadRules).toBe(false)
     expect(result.openaiResponsesPayloadRules).toEqual([])
+    expect(result.preferredOpenaiAccountId).toBe('')
   })
 
   test('updateApiKey serializes toggle and payload rule fields', async () => {
@@ -108,12 +110,14 @@ describe('apiKeyService openai responses config', () => {
     await apiKeyService.updateApiKey('key-1', {
       enableOpenAIResponsesCodexAdaptation: false,
       enableOpenAIResponsesPayloadRules: true,
+      preferredOpenaiAccountId: 'responses:acct-1',
       openaiResponsesPayloadRules: [{ path: 'model', valueType: 'string', value: 'gpt-5' }]
     })
 
     const [, storedKeyData] = redis.setApiKey.mock.calls[0]
     expect(storedKeyData.enableOpenAIResponsesCodexAdaptation).toBe('false')
     expect(storedKeyData.enableOpenAIResponsesPayloadRules).toBe('true')
+    expect(storedKeyData.preferredOpenaiAccountId).toBe('responses:acct-1')
     expect(storedKeyData.openaiResponsesPayloadRules).toBe(
       JSON.stringify([{ path: 'model', valueType: 'string', value: 'gpt-5' }])
     )
@@ -139,8 +143,12 @@ describe('apiKeyService openai responses config', () => {
       claudeConsoleAccountId: '',
       geminiAccountId: '',
       openaiAccountId: '',
+      preferredClaudeAccountId: 'console:claude-console-1',
+      preferredGeminiAccountId: 'api:gemini-api-1',
+      preferredOpenaiAccountId: 'responses:openai-responses-1',
       bedrockAccountId: '',
       droidAccountId: '',
+      preferredDroidAccountId: 'droid-1',
       azureOpenaiAccountId: '',
       ccrAccountId: '',
       enableOpenAIResponsesCodexAdaptation: 'false',
@@ -154,6 +162,10 @@ describe('apiKeyService openai responses config', () => {
 
     expect(result.enableOpenAIResponsesCodexAdaptation).toBe(false)
     expect(result.enableOpenAIResponsesPayloadRules).toBe(true)
+    expect(result.preferredClaudeAccountId).toBe('console:claude-console-1')
+    expect(result.preferredGeminiAccountId).toBe('api:gemini-api-1')
+    expect(result.preferredOpenaiAccountId).toBe('responses:openai-responses-1')
+    expect(result.preferredDroidAccountId).toBe('droid-1')
     expect(result.openaiResponsesPayloadRules).toEqual([
       { path: 'model', valueType: 'string', value: 'gpt-5' }
     ])

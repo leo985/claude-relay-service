@@ -85,6 +85,32 @@
                 {{ platformLabel }}
               </span>
             </div>
+            <div v-if="mode === 'account'" class="pt-1 text-sm">
+              <div class="mb-2 flex items-center justify-between">
+                <span class="text-gray-500 dark:text-gray-400">模拟 Agent</span>
+                <span class="text-xs text-gray-400 dark:text-gray-500">
+                  {{ selectedAgentLabel }}
+                </span>
+              </div>
+              <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                <button
+                  v-for="agent in availableAgentOptions"
+                  :key="agent.value"
+                  :class="[
+                    'flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs font-medium transition',
+                    selectedAgent === agent.value
+                      ? 'border-cyan-400 bg-cyan-50 text-cyan-700 shadow-sm dark:border-cyan-500/60 dark:bg-cyan-500/10 dark:text-cyan-300'
+                      : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-gray-600'
+                  ]"
+                  :disabled="state.testStatus.value === 'testing'"
+                  type="button"
+                  @click="selectedAgent = agent.value"
+                >
+                  <i :class="['fas', agent.icon, agent.color]" />
+                  <span>{{ agent.label }}</span>
+                </button>
+              </div>
+            </div>
             <!-- [account+bedrock] 凭证类型 -->
             <div
               v-if="mode === 'account' && account?.platform === 'bedrock'"
@@ -125,13 +151,14 @@
                 {{ selectedModel }}
               </div>
             </div>
-            <!-- [apikey] 最大输出 Token -->
-            <div v-if="mode === 'apikey'" class="text-sm">
+            <!-- 最大输出 Token -->
+            <div class="text-sm">
               <div class="mb-1 flex items-center justify-between">
                 <span class="text-gray-500 dark:text-gray-400">最大输出 Token</span>
                 <select
                   v-model="maxTokens"
                   class="rounded-lg border border-gray-200 bg-white px-2 py-1 text-sm text-gray-700 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300"
+                  :disabled="state.testStatus.value === 'testing'"
                 >
                   <option v-for="opt in maxTokensOptions" :key="opt.value" :value="opt.value">
                     {{ opt.label }}
@@ -148,17 +175,56 @@
             </div>
           </div>
 
-          <!-- [apikey] 提示词输入 -->
-          <div v-if="mode === 'apikey'" class="mb-4">
+          <!-- 提示词输入 -->
+          <div class="mb-4">
             <label class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
               提示词
             </label>
             <textarea
               v-model="testPrompt"
               class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+              :disabled="state.testStatus.value === 'testing'"
+              :maxlength="mode === 'account' ? 1000 : undefined"
               placeholder="输入测试提示词..."
               rows="2"
             />
+          </div>
+
+          <div
+            v-if="mode === 'account' && state.resultData.value"
+            class="mb-4 grid grid-cols-2 gap-2 rounded-xl border border-gray-200 bg-white p-3 text-xs dark:border-gray-700 dark:bg-gray-800"
+          >
+            <div class="text-gray-500 dark:text-gray-400">Agent</div>
+            <div class="text-right font-medium text-gray-700 dark:text-gray-200">
+              {{ state.resultData.value.agentLabel || selectedAgentLabel }}
+            </div>
+            <div class="text-gray-500 dark:text-gray-400">上游状态</div>
+            <div class="text-right font-mono font-semibold text-gray-700 dark:text-gray-200">
+              HTTP {{ state.resultData.value.statusCode || '—' }}
+            </div>
+            <template v-if="state.resultData.value.statusCode === 429">
+              <div class="text-gray-500 dark:text-gray-400">限流处理</div>
+              <div
+                :class="[
+                  'text-right font-medium',
+                  state.resultData.value.rateLimitedMarked
+                    ? 'text-amber-600 dark:text-amber-300'
+                    : 'text-red-600 dark:text-red-300'
+                ]"
+              >
+                {{
+                  state.resultData.value.rateLimitedMarked
+                    ? '已自动标记限流'
+                    : state.resultData.value.rateLimitMarkReason === 'auto_protection_disabled'
+                      ? '自动防护已关闭，未标记'
+                      : state.resultData.value.rateLimitMarkReason === 'rate_limit_disabled'
+                        ? '该账号已关闭限流标记'
+                        : state.resultData.value.rateLimitMarkReason === 'mark_failed'
+                          ? '限流标记失败，请检查服务日志'
+                          : '未能标记限流'
+                }}
+              </div>
+            </template>
           </div>
 
           <!-- 状态指示 -->
@@ -298,12 +364,21 @@ const props = defineProps({
   serviceType: { type: String, default: 'claude' }
 })
 
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'tested'])
 const state = useTestState()
 
 // ========== 模型相关 ==========
 const selectedModel = ref('')
+const selectedAgent = ref('auto')
+const accountCapabilities = ref(null)
 const modelsFromApi = ref({ claude: [], gemini: [], openai: [], platforms: {} })
+
+const normalizeAccountPlatform = (platform) =>
+  platform === 'azure_openai' ? 'azure-openai' : platform
+
+const normalizedAccountPlatform = computed(() =>
+  normalizeAccountPlatform(props.account?.platform || '')
+)
 
 const loadModels = async () => {
   const result = await getModelsApi()
@@ -312,17 +387,57 @@ const loadModels = async () => {
   }
 }
 
-onMounted(loadModels)
+const loadAccountCapabilities = async () => {
+  if (props.mode !== 'account' || !props.account?.id || !props.account?.platform) {
+    accountCapabilities.value = null
+    return
+  }
+
+  const requestKey = `${props.account.platform}:${props.account.id}`
+  try {
+    const authToken = localStorage.getItem('authToken')
+    const endpoint = `${APP_CONFIG.apiPrefix}/admin/account-tests/${encodeURIComponent(
+      props.account.platform
+    )}/${encodeURIComponent(props.account.id)}/capabilities`
+    const response = await fetch(endpoint, {
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
+    })
+    const result = await response.json().catch(() => ({}))
+    const currentKey = `${props.account?.platform || ''}:${props.account?.id || ''}`
+    if (response.ok && result.success && requestKey === currentKey) {
+      accountCapabilities.value = result.data
+      if (selectedAgent.value === 'auto' && state.testStatus.value === 'idle') {
+        selectedModel.value = defaultModel.value
+      }
+    }
+  } catch {
+    // The local compatibility map keeps the modal usable if capability loading fails.
+  }
+}
+
+onMounted(() => {
+  loadModels()
+  if (props.show) loadAccountCapabilities()
+})
 
 const availableModels = computed(() => {
   if (props.mode === 'account') {
-    const platform = props.account?.platform
+    const rawPlatform = props.account?.platform
+    const platform = normalizedAccountPlatform.value
     if (!platform) return []
+    const capabilityModels = accountCapabilities.value?.modelsByAgent?.[effectiveAgent.value]
+    if (Array.isArray(capabilityModels) && capabilityModels.length > 0) {
+      return capabilityModels
+    }
     // azure-openai 使用 deploymentName
     if (platform === 'azure-openai') {
       return [{ value: props.account.deploymentName, label: props.account.deploymentName }]
     }
-    return modelsFromApi.value.platforms?.[platform] || []
+    return (
+      modelsFromApi.value.platforms?.[rawPlatform] ||
+      modelsFromApi.value.platforms?.[platform] ||
+      []
+    )
   }
   // apikey 模式
   return modelsFromApi.value[props.serviceType] || []
@@ -332,17 +447,50 @@ const availableModels = computed(() => {
 const platformFallbackModels = {
   claude: 'claude-sonnet-4-5-20250929',
   'claude-console': 'claude-sonnet-4-5-20250929',
+  bedrock: 'us.anthropic.claude-3-5-haiku-20241022-v1:0',
   gemini: 'gemini-2.5-pro',
   'gemini-api': 'gemini-2.5-flash',
+  openai: 'gpt-5',
   'openai-responses': 'gpt-5',
+  'azure-openai': 'gpt-4o-mini',
   droid: 'claude-sonnet-4-5-20250929',
   ccr: 'claude-sonnet-4-5-20250929'
 }
 
+const agentFallbackModels = {
+  codex: 'gpt-5',
+  'claude-code': 'claude-sonnet-4-5-20250929',
+  'gemini-cli': 'gemini-2.5-flash',
+  droid: 'claude-sonnet-4-20250514'
+}
+
+const fallbackDefaultAgent = computed(() => {
+  const platform = normalizedAccountPlatform.value
+  if (platform === 'openai' || platform === 'azure-openai') return 'codex'
+  if (platform === 'openai-responses') {
+    return ['passthrough', 'auto'].includes(props.account?.providerEndpoint)
+      ? 'claude-code'
+      : 'codex'
+  }
+  if (platform === 'gemini' || platform === 'gemini-api') return 'gemini-cli'
+  if (platform === 'droid') return 'droid'
+  return 'claude-code'
+})
+
+const effectiveAgent = computed(() =>
+  selectedAgent.value === 'auto'
+    ? accountCapabilities.value?.defaultAgent || fallbackDefaultAgent.value
+    : selectedAgent.value
+)
+
 const defaultModel = computed(() => {
   if (props.mode === 'account') {
-    const platform = props.account?.platform
+    const platform = normalizedAccountPlatform.value
     if (platform === 'azure-openai') return props.account?.deploymentName
+    if (props.account?.boundModel) return props.account.boundModel
+    if (props.account?.defaultModel) return props.account.defaultModel
+    const capabilityDefault = accountCapabilities.value?.defaultModelByAgent?.[effectiveAgent.value]
+    if (capabilityDefault) return capabilityDefault
     // bedrock 优先用列表，列表为空时按凭证类型回退
     if (platform === 'bedrock') {
       const models = availableModels.value
@@ -350,6 +498,9 @@ const defaultModel = computed(() => {
       if (props.account?.credentialType === 'bearer_token')
         return 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'
       return 'us.anthropic.claude-3-5-haiku-20241022-v1:0'
+    }
+    if (platform === 'openai-responses' || platform === 'droid') {
+      return agentFallbackModels[effectiveAgent.value] || platformFallbackModels[platform]
     }
     const models = availableModels.value
     if (models.length > 0) return models[0].value
@@ -364,13 +515,11 @@ const defaultModel = computed(() => {
 // ========== apikey 模式专用 ==========
 const testPrompt = ref('hi')
 const maxTokens = ref(1000)
-const maxTokensOptions = [
-  { value: 100, label: '100' },
-  { value: 500, label: '500' },
-  { value: 1000, label: '1000' },
-  { value: 2000, label: '2000' },
-  { value: 4096, label: '4096' }
-]
+const maxTokensOptions = computed(() =>
+  props.mode === 'account'
+    ? [32, 64, 100, 256].map((value) => ({ value, label: String(value) }))
+    : [100, 500, 1000, 2000, 4096].map((value) => ({ value, label: String(value) }))
+)
 
 const apikeyServiceConfigs = {
   claude: {
@@ -404,7 +553,11 @@ const maskedApiKey = computed(() => {
   return key.substring(0, 6) + '****' + key.substring(key.length - 4)
 })
 
-const disableTest = computed(() => props.mode === 'apikey' && !props.apiKeyValue)
+const disableTest = computed(
+  () =>
+    (props.mode === 'apikey' && !props.apiKeyValue) ||
+    (props.mode === 'account' && (!props.account?.id || !selectedAgent.value))
+)
 
 // ========== account 模式 - 平台信息 ==========
 const platformConfigs = {
@@ -438,6 +591,11 @@ const platformConfigs = {
     icon: 'fas fa-code',
     badge: 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-300'
   },
+  openai: {
+    label: 'OpenAI OAuth',
+    icon: 'fas fa-code',
+    badge: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
+  },
   'azure-openai': {
     label: 'Azure OpenAI',
     icon: 'fab fa-microsoft',
@@ -457,7 +615,7 @@ const platformConfigs = {
 
 const platformConfig = computed(
   () =>
-    platformConfigs[props.account?.platform] || {
+    platformConfigs[normalizedAccountPlatform.value] || {
       label: '未知',
       icon: 'fas fa-question',
       badge: 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300'
@@ -466,6 +624,48 @@ const platformConfig = computed(
 const platformLabel = computed(() => platformConfig.value.label)
 const platformIcon = computed(() => platformConfig.value.icon)
 const platformBadgeClass = computed(() => platformConfig.value.badge)
+
+const agentOptions = [
+  { value: 'auto', label: '自动选择', icon: 'fa-magic', color: 'text-cyan-500' },
+  { value: 'codex', label: 'Codex', icon: 'fa-terminal', color: 'text-emerald-500' },
+  { value: 'claude-code', label: 'Claude Code', icon: 'fa-brain', color: 'text-orange-500' },
+  { value: 'gemini-cli', label: 'Gemini CLI', icon: 'fa-gem', color: 'text-blue-500' },
+  { value: 'droid', label: 'Droid', icon: 'fa-robot', color: 'text-pink-500' }
+]
+
+const supportedAgentsForAccount = computed(() => {
+  if (Array.isArray(accountCapabilities.value?.supportedAgents)) {
+    return accountCapabilities.value.supportedAgents
+  }
+
+  const platform = normalizedAccountPlatform.value
+  if (platform === 'openai' || platform === 'azure-openai' || platform === 'azure_openai') {
+    return ['codex']
+  }
+  if (platform === 'openai-responses') {
+    const supported = ['codex']
+    if (['passthrough', 'auto'].includes(props.account?.providerEndpoint)) {
+      supported.push('claude-code')
+    }
+    return supported
+  }
+  if (platform === 'gemini' || platform === 'gemini-api') return ['gemini-cli']
+  if (platform === 'droid') return ['droid', 'codex', 'claude-code']
+  return ['claude-code']
+})
+
+const availableAgentOptions = computed(() => {
+  const allowed = new Set(['auto', ...supportedAgentsForAccount.value])
+  return agentOptions.filter((agent) => allowed.has(agent.value))
+})
+
+const selectedAgentLabel = computed(() => {
+  if (selectedAgent.value === 'auto') {
+    const effectiveLabel = agentOptions.find((agent) => agent.value === effectiveAgent.value)?.label
+    return effectiveLabel ? `自动选择 · ${effectiveLabel}` : '自动选择'
+  }
+  return agentOptions.find((agent) => agent.value === selectedAgent.value)?.label || '自动选择'
+})
 
 const credentialTypeLabel = computed(() => {
   const ct = props.account?.credentialType
@@ -518,39 +718,27 @@ const statusDescription = computed(() => {
 })
 
 // ========== 测试逻辑 ==========
-const getAccountEndpoint = () => {
-  if (!props.account) return ''
-  const platform = props.account.platform
-  const endpoints = {
-    claude: `${APP_CONFIG.apiPrefix}/admin/claude-accounts/${props.account.id}/test`,
-    'claude-console': `${APP_CONFIG.apiPrefix}/admin/claude-console-accounts/${props.account.id}/test`,
-    bedrock: `${APP_CONFIG.apiPrefix}/admin/bedrock-accounts/${props.account.id}/test`,
-    gemini: `${APP_CONFIG.apiPrefix}/admin/gemini-accounts/${props.account.id}/test`,
-    'gemini-api': `${APP_CONFIG.apiPrefix}/admin/gemini-api-accounts/${props.account.id}/test`,
-    'openai-responses': `${APP_CONFIG.apiPrefix}/admin/openai-responses-accounts/${props.account.id}/test`,
-    'azure-openai': `${APP_CONFIG.apiPrefix}/admin/azure-openai-accounts/${props.account.id}/test`,
-    droid: `${APP_CONFIG.apiPrefix}/admin/droid-accounts/${props.account.id}/test`,
-    ccr: `${APP_CONFIG.apiPrefix}/admin/ccr-accounts/${props.account.id}/test`
-  }
-  return endpoints[platform] || ''
-}
-
-const startTest = () => {
+const startTest = async () => {
   if (props.mode === 'account') {
-    const endpoint = getAccountEndpoint()
-    if (!endpoint) return
-    const authToken = localStorage.getItem('authToken')
-    const useSSE = ['claude', 'claude-console', 'bedrock', 'gemini-api'].includes(
+    if (!props.account?.id || !props.account?.platform) return
+    const endpoint = `${APP_CONFIG.apiPrefix}/admin/account-tests/${encodeURIComponent(
       props.account.platform
-    )
-    state.sendTestRequest(
+    )}/${encodeURIComponent(props.account.id)}`
+    const authToken = localStorage.getItem('authToken')
+    const result = await state.sendTestRequest(
       endpoint,
-      { model: selectedModel.value },
       {
-        useSSE,
+        agent: selectedAgent.value,
+        model: selectedModel.value,
+        prompt: testPrompt.value,
+        maxTokens: maxTokens.value
+      },
+      {
+        useSSE: false,
         headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
       }
     )
+    emit('tested', result?.data || result)
   } else {
     const endpoint = `${APP_CONFIG.apiPrefix}/apiStats${apikeyServiceConfig.value.endpoint}`
     state.sendTestRequest(
@@ -579,10 +767,16 @@ watch(
   (newVal) => {
     if (newVal) {
       state.resetState()
+      accountCapabilities.value = null
       selectedModel.value = defaultModel.value
       if (props.mode === 'apikey') {
         testPrompt.value = 'hi'
         maxTokens.value = 1000
+      } else {
+        testPrompt.value = 'Reply with OK only.'
+        maxTokens.value = 32
+        selectedAgent.value = 'auto'
+        loadAccountCapabilities()
       }
     }
   }
@@ -591,8 +785,15 @@ watch(
 watch(
   () => [props.account, props.serviceType],
   () => {
+    accountCapabilities.value = null
     selectedModel.value = defaultModel.value
+    selectedAgent.value = 'auto'
+    if (props.show && props.mode === 'account') loadAccountCapabilities()
   },
   { deep: true }
 )
+
+watch(selectedAgent, () => {
+  if (props.mode === 'account') selectedModel.value = defaultModel.value
+})
 </script>

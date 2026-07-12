@@ -7,6 +7,11 @@ const redis = require('../../models/redis')
 const logger = require('../../utils/logger')
 const { parseVendorPrefixedModel, isOpus45OrNewer } = require('../../utils/modelHelper')
 const { isSchedulable, sortAccountsByPriority } = require('../../utils/commonHelper')
+const {
+  isPreferredAccountMatch,
+  normalizePreferredAccountRef,
+  pickPreferredAccount
+} = require('../../utils/accountPreferenceHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 
 /**
@@ -176,11 +181,22 @@ class UnifiedClaudeScheduler {
     apiKeyData,
     sessionHash = null,
     requestedModel = null,
-    forcedAccount = null
+    forcedAccount = null,
+    requestFeatures = {}
   ) {
     try {
+      const excludedAccountIds = new Set(
+        Array.isArray(requestFeatures.excludeAccountIds)
+          ? requestFeatures.excludeAccountIds.filter(Boolean)
+          : []
+      )
       // 🔒 如果有强制绑定的账户（全局会话绑定），仅 claude-official 类型受影响
       if (forcedAccount && forcedAccount.accountId && forcedAccount.accountType) {
+        if (excludedAccountIds.has(forcedAccount.accountId)) {
+          const error = new Error('No available Claude accounts for the bound session')
+          error.code = 'UPSTREAM_RATE_LIMIT_ACCOUNTS_EXHAUSTED'
+          throw error
+        }
         // ⚠️ 只有 claude-official 类型账户受全局会话绑定限制
         // 其他类型（bedrock, ccr, claude-console等）忽略绑定，走正常调度
         if (forcedAccount.accountType !== 'claude-official') {
@@ -237,7 +253,12 @@ class UnifiedClaudeScheduler {
       // 如果是 CCR 前缀，只在 CCR 账户池中选择
       if (vendor === 'ccr') {
         logger.info(`🎯 CCR vendor prefix detected, routing to CCR accounts only`)
-        return await this._selectCcrAccount(apiKeyData, sessionHash, effectiveModel)
+        return await this._selectCcrAccount(
+          apiKeyData,
+          sessionHash,
+          effectiveModel,
+          requestFeatures
+        )
       }
       // 如果API Key绑定了专属账户或分组，优先使用
       if (apiKeyData.claudeAccountId) {
@@ -251,13 +272,20 @@ class UnifiedClaudeScheduler {
             groupId,
             sessionHash,
             effectiveModel,
-            vendor === 'ccr'
+            vendor === 'ccr',
+            apiKeyData,
+            requestFeatures
           )
         }
 
         // 普通专属账户
         const boundAccount = await redis.getClaudeAccount(apiKeyData.claudeAccountId)
-        if (boundAccount && boundAccount.isActive === 'true' && boundAccount.status !== 'error') {
+        if (
+          boundAccount &&
+          !excludedAccountIds.has(boundAccount.id) &&
+          boundAccount.isActive === 'true' &&
+          boundAccount.status !== 'error'
+        ) {
           // 检查是否临时不可用
           const isTempUnavailable = await this.isAccountTemporarilyUnavailable(
             boundAccount.id,
@@ -309,6 +337,7 @@ class UnifiedClaudeScheduler {
         )
         if (
           boundConsoleAccount &&
+          !excludedAccountIds.has(boundConsoleAccount.id) &&
           boundConsoleAccount.isActive === true &&
           boundConsoleAccount.status === 'active' &&
           isSchedulable(boundConsoleAccount.schedulable)
@@ -345,6 +374,7 @@ class UnifiedClaudeScheduler {
         )
         if (
           boundBedrockAccountResult.success &&
+          !excludedAccountIds.has(boundBedrockAccountResult.data.id) &&
           boundBedrockAccountResult.data.isActive === true &&
           isSchedulable(boundBedrockAccountResult.data.schedulable)
         ) {
@@ -379,31 +409,38 @@ class UnifiedClaudeScheduler {
       if (sessionHash) {
         const mappedAccount = await this._getSessionMapping(sessionHash)
         if (mappedAccount) {
-          // 当本次请求不是 CCR 前缀时，不允许使用指向 CCR 的粘性会话映射
-          if (vendor !== 'ccr' && mappedAccount.accountType === 'ccr') {
-            logger.info(
-              `ℹ️ Skipping CCR sticky session mapping for non-CCR request; removing mapping for session ${sessionHash}`
-            )
+          if (excludedAccountIds.has(mappedAccount.accountId)) {
             await this._deleteSessionMapping(sessionHash)
-          } else {
-            // 验证映射的账户是否仍然可用
-            const isAvailable = await this._isAccountAvailable(
-              mappedAccount.accountId,
-              mappedAccount.accountType,
-              effectiveModel
+            logger.info(
+              `⏭️ Skipping excluded sticky session account: ${mappedAccount.accountId}`
             )
-            if (isAvailable) {
-              // 🚀 智能会话续期：剩余时间少于14天时自动续期到15天（续期正确的 unified 映射键）
-              await this._extendSessionMappingTTL(sessionHash)
+          } else {
+            // 当本次请求不是 CCR 前缀时，不允许使用指向 CCR 的粘性会话映射
+            if (vendor !== 'ccr' && mappedAccount.accountType === 'ccr') {
               logger.info(
-                `🎯 Using sticky session account: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${sessionHash}`
-              )
-              return mappedAccount
-            } else {
-              logger.warn(
-                `⚠️ Mapped account ${mappedAccount.accountId} is no longer available, selecting new account`
+                `ℹ️ Skipping CCR sticky session mapping for non-CCR request; removing mapping for session ${sessionHash}`
               )
               await this._deleteSessionMapping(sessionHash)
+            } else {
+              // 验证映射的账户是否仍然可用
+              const isAvailable = await this._isAccountAvailable(
+                mappedAccount.accountId,
+                mappedAccount.accountType,
+                effectiveModel
+              )
+              if (isAvailable) {
+                // 🚀 智能会话续期：剩余时间少于14天时自动续期到15天（续期正确的 unified 映射键）
+                await this._extendSessionMappingTTL(sessionHash)
+                logger.info(
+                  `🎯 Using sticky session account: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${sessionHash}`
+                )
+                return mappedAccount
+              } else {
+                logger.warn(
+                  `⚠️ Mapped account ${mappedAccount.accountId} is no longer available, selecting new account`
+                )
+                await this._deleteSessionMapping(sessionHash)
+              }
             }
           }
         }
@@ -413,7 +450,8 @@ class UnifiedClaudeScheduler {
       const availableAccounts = await this._getAllAvailableAccounts(
         apiKeyData,
         effectiveModel,
-        false // 仅前缀才走 CCR：默认池不包含 CCR 账户
+        false, // 仅前缀才走 CCR：默认池不包含 CCR 账户
+        requestFeatures
       )
 
       if (availableAccounts.length === 0) {
@@ -468,8 +506,18 @@ class UnifiedClaudeScheduler {
   }
 
   // 📋 获取所有可用账户（合并官方和Console）
-  async _getAllAvailableAccounts(apiKeyData, requestedModel = null, includeCcr = false) {
+  async _getAllAvailableAccounts(
+    apiKeyData,
+    requestedModel = null,
+    includeCcr = false,
+    requestFeatures = {}
+  ) {
     const availableAccounts = []
+    const excludedAccountIds = new Set(
+      Array.isArray(requestFeatures.excludeAccountIds)
+        ? requestFeatures.excludeAccountIds.filter(Boolean)
+        : []
+    )
     const isOpusRequest =
       requestedModel && typeof requestedModel === 'string'
         ? requestedModel.toLowerCase().includes('opus')
@@ -481,6 +529,7 @@ class UnifiedClaudeScheduler {
       const boundAccount = await redis.getClaudeAccount(apiKeyData.claudeAccountId)
       if (
         boundAccount &&
+        !excludedAccountIds.has(boundAccount.id) &&
         boundAccount.isActive === 'true' &&
         boundAccount.status !== 'error' &&
         boundAccount.status !== 'blocked' &&
@@ -535,6 +584,7 @@ class UnifiedClaudeScheduler {
       )
       if (
         boundConsoleAccount &&
+        !excludedAccountIds.has(boundConsoleAccount.id) &&
         boundConsoleAccount.isActive === true &&
         boundConsoleAccount.status === 'active' &&
         isSchedulable(boundConsoleAccount.schedulable)
@@ -591,6 +641,7 @@ class UnifiedClaudeScheduler {
       )
       if (
         boundBedrockAccountResult.success &&
+        !excludedAccountIds.has(boundBedrockAccountResult.data.id) &&
         boundBedrockAccountResult.data.isActive === true &&
         isSchedulable(boundBedrockAccountResult.data.schedulable)
       ) {
@@ -983,7 +1034,7 @@ class UnifiedClaudeScheduler {
       // 否则走通用的"无可用账户"错误处理（由上层 selectAccountForApiKey 捕获）
     }
 
-    return availableAccounts
+    return availableAccounts.filter((account) => !excludedAccountIds.has(account.accountId))
   }
 
   // 🔍 检查账户是否可用
@@ -1471,9 +1522,16 @@ class UnifiedClaudeScheduler {
     groupId,
     sessionHash = null,
     requestedModel = null,
-    allowCcr = false
+    allowCcr = false,
+    apiKeyData = null,
+    requestFeatures = {}
   ) {
     try {
+      const excludedAccountIds = new Set(
+        Array.isArray(requestFeatures.excludeAccountIds)
+          ? requestFeatures.excludeAccountIds.filter(Boolean)
+          : []
+      )
       // 获取分组信息
       const group = await accountGroupService.getGroup(groupId)
       if (!group) {
@@ -1481,35 +1539,53 @@ class UnifiedClaudeScheduler {
       }
 
       logger.info(`👥 Selecting account from group: ${group.name} (${group.platform})`)
+      const preferredAccountRef = normalizePreferredAccountRef(
+        apiKeyData?.preferredClaudeAccountId,
+        'claude'
+      )
 
       // 如果有会话哈希，检查是否有已映射的账户
       if (sessionHash) {
         const mappedAccount = await this._getSessionMapping(sessionHash)
         if (mappedAccount) {
-          // 验证映射的账户是否属于这个分组
-          const memberIds = await accountGroupService.getGroupMembers(groupId)
-          if (memberIds.includes(mappedAccount.accountId)) {
-            // 非 CCR 请求时不允许 CCR 粘性映射
-            if (!allowCcr && mappedAccount.accountType === 'ccr') {
+          if (excludedAccountIds.has(mappedAccount.accountId)) {
+            await this._deleteSessionMapping(sessionHash)
+          } else {
+            if (
+              preferredAccountRef &&
+              !isPreferredAccountMatch(mappedAccount, preferredAccountRef)
+            ) {
+              logger.info(
+                `🎯 Sticky session account ${mappedAccount.accountId} is not the API key preferred account, selecting again`
+              )
               await this._deleteSessionMapping(sessionHash)
             } else {
-              const isAvailable = await this._isAccountAvailable(
-                mappedAccount.accountId,
-                mappedAccount.accountType,
-                requestedModel
-              )
-              if (isAvailable) {
-                // 🚀 智能会话续期：续期 unified 映射键
-                await this._extendSessionMappingTTL(sessionHash)
-                logger.info(
-                  `🎯 Using sticky session account from group: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${sessionHash}`
-                )
-                return mappedAccount
+              // 验证映射的账户是否属于这个分组
+              const memberIds = await accountGroupService.getGroupMembers(groupId)
+              if (memberIds.includes(mappedAccount.accountId)) {
+                // 非 CCR 请求时不允许 CCR 粘性映射
+                if (!allowCcr && mappedAccount.accountType === 'ccr') {
+                  await this._deleteSessionMapping(sessionHash)
+                } else {
+                  const isAvailable = await this._isAccountAvailable(
+                    mappedAccount.accountId,
+                    mappedAccount.accountType,
+                    requestedModel
+                  )
+                  if (isAvailable) {
+                    // 🚀 智能会话续期：续期 unified 映射键
+                    await this._extendSessionMappingTTL(sessionHash)
+                    logger.info(
+                      `🎯 Using sticky session account from group: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${sessionHash}`
+                    )
+                    return mappedAccount
+                  }
+                }
               }
+              // 如果映射的账户不可用或不在分组中，删除映射
+              await this._deleteSessionMapping(sessionHash)
             }
           }
-          // 如果映射的账户不可用或不在分组中，删除映射
-          await this._deleteSessionMapping(sessionHash)
         }
       }
 
@@ -1527,6 +1603,9 @@ class UnifiedClaudeScheduler {
 
       // 获取所有成员账户的详细信息
       for (const memberId of memberIds) {
+        if (excludedAccountIds.has(memberId)) {
+          continue
+        }
         let account = null
         let accountType = null
 
@@ -1629,11 +1708,13 @@ class UnifiedClaudeScheduler {
         throw new Error(`No available accounts in group ${group.name}`)
       }
 
-      // 使用现有的优先级排序逻辑
+      const preferredAccount = pickPreferredAccount(
+        availableAccounts,
+        apiKeyData?.preferredClaudeAccountId,
+        'claude'
+      )
       const sortedAccounts = sortAccountsByPriority(availableAccounts)
-
-      // 选择第一个账户
-      const selectedAccount = sortedAccounts[0]
+      const selectedAccount = preferredAccount || sortedAccounts[0]
 
       // 如果有会话哈希，建立新的映射
       if (sessionHash) {
@@ -1648,7 +1729,7 @@ class UnifiedClaudeScheduler {
       }
 
       logger.info(
-        `🎯 Selected account from group ${group.name}: ${selectedAccount.name} (${selectedAccount.accountId}, ${selectedAccount.accountType}) with priority ${selectedAccount.priority}`
+        `🎯 Selected account from group ${group.name}: ${selectedAccount.name} (${selectedAccount.accountId}, ${selectedAccount.accountType}) with priority ${selectedAccount.priority}${preferredAccount ? ' (preferred by API key)' : ''}`
       )
 
       return {
@@ -1662,12 +1743,26 @@ class UnifiedClaudeScheduler {
   }
 
   // 🎯 专门选择CCR账户（仅限CCR前缀路由使用）
-  async _selectCcrAccount(apiKeyData, sessionHash = null, effectiveModel = null) {
+  async _selectCcrAccount(
+    apiKeyData,
+    sessionHash = null,
+    effectiveModel = null,
+    requestFeatures = {}
+  ) {
     try {
+      const excludedAccountIds = new Set(
+        Array.isArray(requestFeatures.excludeAccountIds)
+          ? requestFeatures.excludeAccountIds.filter(Boolean)
+          : []
+      )
       // 1. 检查会话粘性
       if (sessionHash) {
         const mappedAccount = await this._getSessionMapping(sessionHash)
-        if (mappedAccount && mappedAccount.accountType === 'ccr') {
+        if (
+          mappedAccount &&
+          mappedAccount.accountType === 'ccr' &&
+          !excludedAccountIds.has(mappedAccount.accountId)
+        ) {
           // 验证映射的CCR账户是否仍然可用
           const isAvailable = await this._isAccountAvailable(
             mappedAccount.accountId,
@@ -1691,7 +1786,10 @@ class UnifiedClaudeScheduler {
       }
 
       // 2. 获取所有可用的CCR账户
-      const availableCcrAccounts = await this._getAvailableCcrAccounts(effectiveModel)
+      const availableCcrAccounts = await this._getAvailableCcrAccounts(
+        effectiveModel,
+        requestFeatures
+      )
 
       if (availableCcrAccounts.length === 0) {
         throw new Error(
@@ -1730,14 +1828,22 @@ class UnifiedClaudeScheduler {
   }
 
   // 📋 获取所有可用的CCR账户
-  async _getAvailableCcrAccounts(requestedModel = null) {
+  async _getAvailableCcrAccounts(requestedModel = null, requestFeatures = {}) {
     const availableAccounts = []
+    const excludedAccountIds = new Set(
+      Array.isArray(requestFeatures.excludeAccountIds)
+        ? requestFeatures.excludeAccountIds.filter(Boolean)
+        : []
+    )
 
     try {
       const ccrAccounts = await ccrAccountService.getAllAccounts()
       logger.info(`📋 Found ${ccrAccounts.length} total CCR accounts for CCR-only selection`)
 
       for (const account of ccrAccounts) {
+        if (excludedAccountIds.has(account.id)) {
+          continue
+        }
         logger.debug(
           `🔍 Checking CCR account: ${account.name} - isActive: ${account.isActive}, status: ${account.status}, accountType: ${account.accountType}, schedulable: ${account.schedulable}`
         )

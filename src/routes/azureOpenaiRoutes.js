@@ -268,7 +268,8 @@ router.post('/chat/completions', authenticateApiKey, async (req, res) => {
     logger.error(`Azure OpenAI request failed ${requestId}:`, error)
 
     if (!res.headersSent) {
-      const statusCode = error.response?.status || 500
+      const upstreamStatusCode = error.response?.status || 500
+      const statusCode = upstreamStatusCode === 429 ? 503 : upstreamStatusCode
       res
         .status(statusCode)
         .json(
@@ -397,7 +398,8 @@ router.post('/responses', authenticateApiKey, async (req, res) => {
     logger.error(`Azure OpenAI responses request failed ${requestId}:`, error)
 
     if (!res.headersSent) {
-      const statusCode = error.response?.status || 500
+      const upstreamStatusCode = error.response?.status || 500
+      const statusCode = upstreamStatusCode === 429 ? 503 : upstreamStatusCode
       res
         .status(statusCode)
         .json(
@@ -499,7 +501,8 @@ router.post('/embeddings', authenticateApiKey, async (req, res) => {
     logger.error(`Azure OpenAI embeddings request failed ${requestId}:`, error)
 
     if (!res.headersSent) {
-      const statusCode = error.response?.status || 500
+      const upstreamStatusCode = error.response?.status || 500
+      const statusCode = upstreamStatusCode === 429 ? 503 : upstreamStatusCode
       res
         .status(statusCode)
         .json(

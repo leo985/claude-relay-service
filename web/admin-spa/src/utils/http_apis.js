@@ -236,6 +236,16 @@ export const deleteAccountByEndpointApi = (endpoint) => request({ url: endpoint,
 export const testAccountByEndpointApi = (endpoint) => request({ url: endpoint, method: 'POST' })
 export const updateAccountByEndpointApi = (endpoint, data) =>
   request({ url: endpoint, method: 'PUT', data })
+export const batchAccountTestsApi = (data) =>
+  request({ url: '/admin/account-tests/batch', method: 'POST', data })
+export const startBatchAccountTestsApi = (data) =>
+  request({ url: '/admin/account-tests/batch/jobs', method: 'POST', data })
+export const getBatchAccountTestJobApi = (jobId) =>
+  request({ url: `/admin/account-tests/batch/jobs/${encodeURIComponent(jobId)}`, method: 'GET' })
+export const getLatestBatchAccountTestResultApi = () =>
+  request({ url: '/admin/account-tests/batch/latest', method: 'GET' })
+export const getLatestAccountTestResultsApi = () =>
+  request({ url: '/admin/account-tests/results', method: 'GET' })
 
 // 账户使用统计
 export const getClaudeAccountsUsageApi = () =>

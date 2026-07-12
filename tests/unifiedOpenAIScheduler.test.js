@@ -411,6 +411,49 @@ describe('UnifiedOpenAIScheduler', () => {
       expect(openaiAccountService.recordUsage).toHaveBeenCalledWith('gpt-beiming', 0)
     })
 
+    it('uses the API key preferred account inside a group when it is available', async () => {
+      accountGroupService.getGroup.mockResolvedValue({
+        id: 'group-1',
+        name: 'Preferred Group',
+        platform: 'openai'
+      })
+      accountGroupService.getGroupMembers.mockResolvedValue(['first-account', 'preferred-account'])
+      upstreamErrorHelper.isTempUnavailable.mockResolvedValue(false)
+      openaiAccountService.isTokenExpired.mockReturnValue(false)
+      openaiAccountService.recordUsage.mockResolvedValue(undefined)
+      openaiAccountService.getAccount.mockImplementation(async (accountId) => {
+        const accounts = {
+          'first-account': {
+            id: 'first-account',
+            name: 'First Account',
+            isActive: 'true',
+            status: 'active',
+            schedulable: 'true'
+          },
+          'preferred-account': {
+            id: 'preferred-account',
+            name: 'Preferred Account',
+            isActive: 'true',
+            status: 'active',
+            schedulable: 'true'
+          }
+        }
+        return accounts[accountId] || null
+      })
+      openaiResponsesAccountService.getAccount.mockResolvedValue(null)
+
+      const result = await unifiedOpenAIScheduler.selectAccountFromGroup(
+        'group-1',
+        null,
+        'gpt-5',
+        { name: 'Key A', preferredOpenaiAccountId: 'preferred-account' },
+        { endpointKind: 'responses' }
+      )
+
+      expect(result).toEqual({ accountId: 'preferred-account', accountType: 'openai' })
+      expect(openaiAccountService.recordUsage).toHaveBeenCalledWith('preferred-account', 0)
+    })
+
     it('does not allow Codex token accounts for forced OpenAI-compatible text requests', async () => {
       accountGroupService.getGroup.mockResolvedValue({
         id: 'group-1',

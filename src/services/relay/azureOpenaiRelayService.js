@@ -315,7 +315,8 @@ function handleStreamResponse(upstreamResponse, clientResponse, options = {}) {
     const FINAL_CHUNKS_SIZE = 32 * 1024 // 32KB保留最终chunks
     const allParsedEvents = [] // 存储所有解析的事件用于最终usage提取
 
-    clientResponse.status(upstreamResponse.status)
+    const clientStatus = upstreamResponse.status === 429 ? 503 : upstreamResponse.status
+    clientResponse.status(clientStatus)
 
     // 设置响应头
     clientResponse.setHeader('Content-Type', 'text/event-stream')
@@ -777,7 +778,8 @@ function extractUsageDataRobust(responseData, context = 'unknown') {
 function handleNonStreamResponse(upstreamResponse, clientResponse) {
   try {
     // 设置状态码
-    clientResponse.status(upstreamResponse.status)
+    const clientStatus = upstreamResponse.status === 429 ? 503 : upstreamResponse.status
+    clientResponse.status(clientStatus)
 
     // 设置响应头
     clientResponse.setHeader('Content-Type', 'application/json')
@@ -799,7 +801,7 @@ function handleNonStreamResponse(upstreamResponse, clientResponse) {
     const responseData =
       upstreamResponse.status >= 400
         ? upstreamErrorHelper.buildSafeUpstreamErrorForClient(
-            upstreamResponse.status,
+            clientStatus,
             upstreamResponse.data
           )
         : upstreamResponse.data

@@ -32,6 +32,7 @@ jest.mock('axios', () => ({
 jest.mock('../src/services/scheduler/unifiedOpenAIScheduler', () => ({
   selectAccountForApiKey: jest.fn(),
   markAccountRateLimited: jest.fn(),
+  _deleteSessionMapping: jest.fn().mockResolvedValue(),
   isAccountRateLimited: jest.fn().mockResolvedValue(false),
   removeAccountRateLimit: jest.fn(),
   markAccountUnauthorized: jest.fn()
@@ -563,5 +564,126 @@ describe('openai responses payload toggles', () => {
     expect(req.body.model).toBe('o1-mini')
     expect(req.body.prompt_cache_key).toBe('compact-key')
     expect(req.body.instructions).toBe(openaiRoutes.CODEX_CLI_INSTRUCTIONS)
+  })
+
+  test('keeps switching OpenAI Codex accounts after 429 until one succeeds', async () => {
+    unifiedOpenAIScheduler.selectAccountForApiKey.mockReset()
+    axios.post.mockReset()
+    unifiedOpenAIScheduler.selectAccountForApiKey
+      .mockResolvedValueOnce({
+        accountId: 'openai-1',
+        accountType: 'openai'
+      })
+      .mockResolvedValueOnce({
+        accountId: 'openai-2',
+        accountType: 'openai'
+      })
+      .mockResolvedValueOnce({
+        accountId: 'openai-3',
+        accountType: 'openai'
+      })
+      .mockResolvedValueOnce({
+        accountId: 'openai-4',
+        accountType: 'openai'
+      })
+    openaiAccountService.getAccount.mockImplementation(async (id) => ({
+      id,
+      name: id === 'openai-1' ? 'Primary OpenAI' : 'Backup OpenAI',
+      accessToken: `encrypted-${id}`,
+      accountId: `chatgpt-${id}`
+    }))
+    axios.post
+      .mockResolvedValueOnce({
+        status: 429,
+        data: { error: { message: 'rate limited', resets_in_seconds: 20 } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 429,
+        data: { error: { message: 'rate limited', resets_in_seconds: 20 } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 429,
+        data: { error: { message: 'rate limited', resets_in_seconds: 20 } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: {
+          model: 'gpt-5',
+          usage: {
+            input_tokens: 8,
+            output_tokens: 4,
+            total_tokens: 12
+          }
+        },
+        headers: {}
+      })
+
+    const req = createReq({
+      body: {
+        model: 'gpt-5',
+        prompt_cache_key: 'retry-session',
+        stream: false
+      }
+    })
+    const res = createRes()
+
+    await openaiRoutes.handleResponses(req, res)
+
+    expect(unifiedOpenAIScheduler.markAccountRateLimited).toHaveBeenCalledWith(
+      'openai-1',
+      'openai',
+      createHash('retry-session'),
+      20
+    )
+    expect(unifiedOpenAIScheduler.selectAccountForApiKey.mock.calls[3][3]).toEqual(
+      expect.objectContaining({
+        excludeAccountIds: ['openai-1', 'openai-2', 'openai-3']
+      })
+    )
+    expect(axios.post).toHaveBeenCalledTimes(4)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.status).not.toHaveBeenCalledWith(429)
+  })
+
+  test('returns 503 instead of 429 when Codex 429 retry has no alternate account', async () => {
+    unifiedOpenAIScheduler.selectAccountForApiKey.mockReset()
+    axios.post.mockReset()
+    unifiedOpenAIScheduler.selectAccountForApiKey
+      .mockResolvedValueOnce({
+        accountId: 'openai-1',
+        accountType: 'openai'
+      })
+      .mockRejectedValueOnce(Object.assign(new Error('No available OpenAI account found'), {
+        statusCode: 402
+      }))
+    openaiAccountService.getAccount.mockResolvedValue({
+      id: 'openai-1',
+      name: 'Primary OpenAI',
+      accessToken: 'encrypted-openai-1',
+      accountId: 'chatgpt-openai-1'
+    })
+    axios.post.mockResolvedValueOnce({
+      status: 429,
+      data: { error: { message: 'rate limited', resets_in_seconds: 25 } },
+      headers: {}
+    })
+
+    const req = createReq({
+      body: {
+        model: 'gpt-5',
+        prompt_cache_key: 'retry-empty',
+        stream: false
+      }
+    })
+    const res = createRes()
+
+    await openaiRoutes.handleResponses(req, res)
+
+    expect(res.status).toHaveBeenCalledWith(503)
+    expect(res.status).not.toHaveBeenCalledWith(429)
+    expect(res.payload.error.code).toBe('upstream_accounts_rate_limited')
   })
 })

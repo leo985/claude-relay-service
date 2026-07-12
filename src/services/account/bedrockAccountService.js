@@ -67,7 +67,13 @@ class BedrockAccountService {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       type: 'bedrock', // 标识这是Bedrock账户
-      disableAutoProtection // 关闭自动防护
+      disableAutoProtection, // 关闭自动防护
+      status: 'active',
+      errorMessage: '',
+      rateLimitedAt: '',
+      rateLimitStatus: '',
+      rateLimitResetAt: '',
+      rateLimitDuration: String(options.rateLimitDuration || 60)
     }
 
     // 加密存储AWS凭证
@@ -239,6 +245,12 @@ class BedrockAccountService {
             priority: account.priority,
             schedulable: account.schedulable,
             credentialType: account.credentialType,
+            status: account.status || 'active',
+            errorMessage: account.errorMessage || '',
+            rateLimitedAt: account.rateLimitedAt || '',
+            rateLimitStatus: account.rateLimitStatus || '',
+            rateLimitResetAt: account.rateLimitResetAt || '',
+            rateLimitDuration: account.rateLimitDuration || '60',
 
             // ✅ 前端显示订阅过期时间（业务字段）
             expiresAt: account.subscriptionExpiresAt || null,
@@ -273,6 +285,47 @@ class BedrockAccountService {
     } catch (error) {
       logger.error('❌ 获取Bedrock账户列表失败', error)
       return { success: false, error: error.message }
+    }
+  }
+
+  async markAccountRateLimited(accountId, duration = null) {
+    const client = redis.getClientSafe()
+    const accountData = await client.get(`bedrock_account:${accountId}`)
+    if (!accountData) {
+      throw new Error('Account not found')
+    }
+
+    // Work on the stored representation so encrypted AWS credentials never get written back decrypted.
+    const account = JSON.parse(accountData)
+    if (account.disableAutoProtection === true || account.disableAutoProtection === 'true') {
+      await upstreamErrorHelper
+        .recordErrorHistory(accountId, 'bedrock', 429, 'rate_limit')
+        .catch(() => {})
+      return { success: true, skipped: true }
+    }
+
+    const durationMinutes = duration || parseInt(account.rateLimitDuration, 10) || 60
+    const now = new Date()
+    const resetAt = new Date(now.getTime() + durationMinutes * 60 * 1000)
+    Object.assign(account, {
+      status: 'rateLimited',
+      errorMessage: `Rate limited until ${resetAt.toISOString()}`,
+      rateLimitedAt: now.toISOString(),
+      rateLimitStatus: 'limited',
+      rateLimitResetAt: resetAt.toISOString(),
+      rateLimitDuration: String(durationMinutes),
+      schedulable: false,
+      updatedAt: now.toISOString()
+    })
+
+    await client.set(`bedrock_account:${accountId}`, JSON.stringify(account))
+    logger.warn(
+      `Bedrock account ${account.name} marked as rate limited until ${resetAt.toISOString()}`
+    )
+    return {
+      success: true,
+      rateLimitedAt: now.toISOString(),
+      rateLimitResetAt: resetAt.toISOString()
     }
   }
 
@@ -788,24 +841,27 @@ class BedrockAccountService {
   // 🔄 重置Bedrock账户所有异常状态
   async resetAccountStatus(accountId) {
     try {
-      const accountData = await this.getAccount(accountId)
+      const client = redis.getClientSafe()
+      const accountData = await client.get(`bedrock_account:${accountId}`)
       if (!accountData) {
         throw new Error('Account not found')
       }
 
-      const client = redis.getClientSafe()
-      const accountKey = `bedrock:account:${accountId}`
-
-      const updates = {
+      // Keep credentials in their encrypted-at-rest representation while resetting status fields.
+      const account = JSON.parse(accountData)
+      Object.assign(account, {
         status: 'active',
         errorMessage: '',
-        schedulable: 'true',
-        isActive: 'true'
-      }
+        schedulable: true,
+        isActive: true,
+        updatedAt: new Date().toISOString()
+      })
 
       const fieldsToDelete = [
         'rateLimitedAt',
         'rateLimitStatus',
+        'rateLimitResetAt',
+        'rateLimitAutoStopped',
         'unauthorizedAt',
         'unauthorizedCount',
         'overloadedAt',
@@ -814,8 +870,8 @@ class BedrockAccountService {
         'quotaStoppedAt'
       ]
 
-      await client.hset(accountKey, updates)
-      await client.hdel(accountKey, ...fieldsToDelete)
+      fieldsToDelete.forEach((field) => delete account[field])
+      await client.set(`bedrock_account:${accountId}`, JSON.stringify(account))
 
       logger.success(`Reset all error status for Bedrock account ${accountId}`)
 
@@ -827,7 +883,7 @@ class BedrockAccountService {
         const webhookNotifier = require('../../utils/webhookNotifier')
         await webhookNotifier.sendAccountAnomalyNotification({
           accountId,
-          accountName: accountData.name || accountId,
+          accountName: account.name || accountId,
           platform: 'bedrock',
           status: 'recovered',
           errorCode: 'STATUS_RESET',

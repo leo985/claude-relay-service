@@ -114,13 +114,33 @@ class OpenAITokenImageRelayService {
     return requestOptions
   }
 
-  // 从 response.completed 的 response.output 中取图片 base64
-  _findImageItem(responseObj) {
+  _extractImageBase64(value) {
+    if (!value || typeof value !== 'object') {
+      return null
+    }
+    const candidate = value.b64_json || value.result || value.image?.b64_json || null
+    if (typeof candidate !== 'string' || !candidate.trim()) {
+      return null
+    }
+    return candidate.startsWith('data:') ? candidate.slice(candidate.indexOf(',') + 1) : candidate
+  }
+
+  // Responses has used both image_generation.b64_json and image_generation_call.result.
+  _findImageBase64(responseObj) {
     const output = responseObj?.output
     if (!Array.isArray(output)) {
       return null
     }
-    return output.find((item) => item && item.type === 'image_generation' && item.b64_json) || null
+    for (const item of output) {
+      if (!['image_generation', 'image_generation_call'].includes(item?.type)) {
+        continue
+      }
+      const imageB64 = this._extractImageBase64(item)
+      if (imageB64) {
+        return imageB64
+      }
+    }
+    return null
   }
 
   // 读取上游 SSE 流，捕获最终图片 base64 + usage + 实际模型
@@ -130,45 +150,81 @@ class OpenAITokenImageRelayService {
       let imageB64 = null
       let usageData = null
       let actualModel = null
+      const eventTypes = new Set()
+      const outputItemShapes = new Set()
       const cleanup = () => {
         stream.removeAllListeners('data')
         stream.removeAllListeners('end')
         stream.removeAllListeners('error')
       }
 
+      const recordItemShape = (item) => {
+        if (!item || typeof item !== 'object') {
+          return
+        }
+        const keys = Object.keys(item)
+          .filter((key) => !['b64_json', 'result'].includes(key))
+          .sort()
+        outputItemShapes.add(`${item.type || 'unknown'}[${keys.join(',')}]`)
+      }
+
+      const consumeData = (data) => {
+        eventTypes.add(data.type || 'unknown')
+        if (data.type === 'response.completed' && data.response) {
+          actualModel = data.response.model || actualModel
+          if (data.response.usage) {
+            usageData = data.response.usage
+          }
+          for (const item of data.response.output || []) {
+            recordItemShape(item)
+          }
+          imageB64 = this._findImageBase64(data.response) || imageB64
+          return
+        }
+
+        if (data.type === 'response.output_item.done') {
+          recordItemShape(data.item)
+          imageB64 = this._extractImageBase64(data.item) || imageB64
+          return
+        }
+
+        if (data.type === 'response.image_generation_call.completed') {
+          const item = data.item || data.image_generation_call || data
+          recordItemShape(item)
+          imageB64 = this._extractImageBase64(item) || imageB64
+        }
+      }
+
+      const consumeEvents = (events) => {
+        for (const event of events) {
+          if (event.type === 'data' && event.data) {
+            consumeData(event.data)
+          }
+        }
+      }
+
       stream.on('data', (chunk) => {
         try {
-          const events = parser.feed(chunk.toString())
-          for (const event of events) {
-            if (event.type !== 'data' || !event.data) {
-              continue
-            }
-            const { data } = event
-            if (data.type === 'response.completed' && data.response) {
-              actualModel = data.response.model || actualModel
-              if (data.response.usage) {
-                usageData = data.response.usage
-              }
-              const item = this._findImageItem(data.response)
-              if (item?.b64_json) {
-                imageB64 = item.b64_json
-              }
-            } else if (
-              data.type === 'response.output_item.done' &&
-              data.item?.type === 'image_generation' &&
-              data.item.b64_json
-            ) {
-              imageB64 = data.item.b64_json
-            }
-          }
+          consumeEvents(parser.feed(chunk.toString()))
         } catch (error) {
           logger.error('Error parsing token-mode image SSE chunk:', error)
         }
       })
 
       stream.on('end', () => {
+        if (parser.getRemaining().trim()) {
+          consumeEvents(parser.feed('\n\n'))
+        }
         cleanup()
-        resolve({ imageB64, usageData, actualModel })
+        resolve({
+          imageB64,
+          usageData,
+          actualModel,
+          diagnostics: {
+            eventTypes: Array.from(eventTypes).slice(0, 30),
+            outputItemShapes: Array.from(outputItemShapes).slice(0, 30)
+          }
+        })
       })
 
       stream.on('error', (err) => {
@@ -203,9 +259,10 @@ class OpenAITokenImageRelayService {
     const errorData = await this._readErrorBody(response)
     const autoProtectionDisabled =
       account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+    let resetsInSeconds = null
 
     if (response.status === 429) {
-      const resetsInSeconds =
+      resetsInSeconds =
         errorData?.error?.resets_in_seconds ||
         errorData?.detail?.resets_in_seconds ||
         upstreamErrorHelper.parseRetryAfter(response.headers)
@@ -234,9 +291,13 @@ class OpenAITokenImageRelayService {
     if (res.headersSent) {
       return res.end()
     }
+    const clientStatus = response.status === 429 ? 503 : response.status
+    if (response.status === 429 && resetsInSeconds !== null && resetsInSeconds !== undefined) {
+      res.setHeader('Retry-After', String(resetsInSeconds))
+    }
     return res
-      .status(response.status)
-      .json(upstreamErrorHelper.sanitizeErrorForClient(errorData, { statusCode: response.status }))
+      .status(clientStatus)
+      .json(upstreamErrorHelper.sanitizeErrorForClient(errorData, { statusCode: clientStatus }))
   }
 
   async _recordUsage({ req, account, apiKeyData, usageData, actualModel, statusCode }) {
@@ -359,7 +420,9 @@ class OpenAITokenImageRelayService {
         return this._handleErrorResponse({ res, account, response })
       }
 
-      const { imageB64, usageData, actualModel } = await this._consumeStream(response.data)
+      const { imageB64, usageData, actualModel, diagnostics } = await this._consumeStream(
+        response.data
+      )
 
       await openaiAccountService.updateAccount(account.id, {
         lastUsedAt: new Date().toISOString()
@@ -376,7 +439,9 @@ class OpenAITokenImageRelayService {
 
       if (!imageB64) {
         logger.error('Token-mode image stream completed without an image item', {
-          accountId: account.id
+          accountId: account.id,
+          eventTypes: diagnostics.eventTypes,
+          outputItemShapes: diagnostics.outputItemShapes
         })
         if (!res.headersSent) {
           return res.status(502).json({
@@ -424,7 +489,8 @@ class OpenAITokenImageRelayService {
       }
 
       if (error.statusCode && !error.response) {
-        return res.status(error.statusCode).json({
+        const clientStatus = error.statusCode === 429 ? 503 : error.statusCode
+        return res.status(clientStatus).json({
           error: {
             message: error.message || 'Invalid request',
             type: error.code || 'invalid_request_error',
@@ -434,10 +500,14 @@ class OpenAITokenImageRelayService {
       }
 
       const status = error.statusCode || error.response?.status || 500
+      const clientStatus = status === 429 ? 503 : status
       return res
-        .status(status)
+        .status(clientStatus)
         .json(
-          upstreamErrorHelper.buildSafeUpstreamErrorForClient(status, error.response?.data || error)
+          upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+            clientStatus,
+            error.response?.data || error
+          )
         )
     } finally {
       if (handleClientDisconnect) {

@@ -6,6 +6,11 @@ const logger = require('../../utils/logger')
 const { isSchedulable, sortAccountsByPriority } = require('../../utils/commonHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const {
+  isPreferredAccountMatch,
+  normalizePreferredAccountRef,
+  pickPreferredAccount
+} = require('../../utils/accountPreferenceHelper')
+const {
   accountSupportsRequestFeatures,
   getOpenAIImageModelRank,
   getOpenAIResponsesModelRank
@@ -1210,13 +1215,25 @@ class UnifiedOpenAIScheduler {
       }
 
       logger.info(`👥 Selecting account from OpenAI group: ${group.name}`)
+      const preferredAccountRef = normalizePreferredAccountRef(
+        _apiKeyData?.preferredOpenaiAccountId,
+        'openai'
+      )
 
       // 如果有会话哈希，检查是否有已映射的账户
       if (sessionHash) {
         const excludedAccountIds = new Set(requestFeatures.excludeAccountIds || [])
         const mappedAccount = await this._getSessionMapping(sessionHash)
         if (mappedAccount) {
-          if (excludedAccountIds.has(mappedAccount.accountId)) {
+          if (
+            preferredAccountRef &&
+            !isPreferredAccountMatch(mappedAccount, preferredAccountRef)
+          ) {
+            logger.info(
+              `🎯 Sticky session account ${mappedAccount.accountId} is not the API key preferred account, selecting again`
+            )
+            await this._deleteSessionMapping(sessionHash)
+          } else if (excludedAccountIds.has(mappedAccount.accountId)) {
             logger.warn(
               `⚠️ Sticky session account ${mappedAccount.accountId} is excluded for retry, selecting new account`
             )
@@ -1514,11 +1531,13 @@ class UnifiedOpenAIScheduler {
         throw error
       }
 
-      // 按优先级和最后使用时间排序（与 Claude/Gemini 调度保持一致）
+      const preferredAccount = pickPreferredAccount(
+        availableAccounts,
+        _apiKeyData?.preferredOpenaiAccountId,
+        'openai'
+      )
       const sortedAccounts = this._sortAvailableAccounts(availableAccounts)
-
-      // 选择第一个账户
-      const selectedAccount = sortedAccounts[0]
+      const selectedAccount = preferredAccount || sortedAccounts[0]
 
       // 如果有会话哈希，建立新的映射
       if (sessionHash) {
@@ -1535,7 +1554,7 @@ class UnifiedOpenAIScheduler {
       }
 
       logger.info(
-        `🎯 Selected account from group: ${selectedAccount.name} (${selectedAccount.accountId}, ${selectedAccount.accountType}, priority: ${selectedAccount.priority || 50})`
+        `🎯 Selected account from group: ${selectedAccount.name} (${selectedAccount.accountId}, ${selectedAccount.accountType}, priority: ${selectedAccount.priority || 50}${preferredAccount ? ', preferred by API key' : ''})`
       )
 
       // 更新账户的最后使用时间

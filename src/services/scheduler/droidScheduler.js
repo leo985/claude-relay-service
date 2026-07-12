@@ -9,6 +9,11 @@ const {
   sortAccountsByPriority,
   normalizeEndpointType
 } = require('../../utils/commonHelper')
+const {
+  isPreferredAccountMatch,
+  normalizePreferredAccountRef,
+  pickPreferredAccount
+} = require('../../utils/accountPreferenceHelper')
 
 class DroidScheduler {
   constructor() {
@@ -97,6 +102,9 @@ class DroidScheduler {
   async selectAccount(apiKeyData, endpointType, sessionHash) {
     const normalizedEndpoint = normalizeEndpointType(endpointType)
     const stickyKey = this._composeStickySessionKey(normalizedEndpoint, sessionHash, apiKeyData?.id)
+    const preferredAccountRef = apiKeyData?.droidAccountId?.startsWith('group:')
+      ? normalizePreferredAccountRef(apiKeyData?.preferredDroidAccountId, 'droid')
+      : null
 
     let candidates = []
     let isDedicatedBinding = false
@@ -160,21 +168,33 @@ class DroidScheduler {
       const mappedAccountId = await redis.getSessionAccountMapping(stickyKey)
       if (mappedAccountId) {
         const mappedAccount = filtered.find((account) => account.id === mappedAccountId)
-        if (mappedAccount) {
+        if (
+          mappedAccount &&
+          preferredAccountRef &&
+          !isPreferredAccountMatch(mappedAccount, preferredAccountRef)
+        ) {
+          logger.info(
+            `🤖 Droid 粘性会话账号 ${mappedAccountId} 不是 API Key 组内优先账号，重新调度`
+          )
+          await this._cleanupStickyMapping(stickyKey)
+        } else if (mappedAccount) {
           await redis.extendSessionAccountMappingTTL(stickyKey)
           logger.info(
             `🤖 命中 Droid 粘性会话: ${sessionHash} -> ${mappedAccount.name || mappedAccount.id}`
           )
           await this._ensureLastUsedUpdated(mappedAccount.id)
           return mappedAccount
+        } else {
+          await this._cleanupStickyMapping(stickyKey)
         }
-
-        await this._cleanupStickyMapping(stickyKey)
       }
     }
 
+    const preferredAccount = apiKeyData?.droidAccountId?.startsWith('group:')
+      ? pickPreferredAccount(filtered, apiKeyData?.preferredDroidAccountId, 'droid')
+      : null
     const sorted = sortAccountsByPriority(filtered)
-    const selected = sorted[0]
+    const selected = preferredAccount || sorted[0]
 
     if (!selected) {
       throw new Error(`No schedulable account available after sorting (${normalizedEndpoint})`)
@@ -187,7 +207,7 @@ class DroidScheduler {
     await this._ensureLastUsedUpdated(selected.id)
 
     logger.info(
-      `🤖 选择 Droid 账号 ${selected.name || selected.id}（endpoint: ${normalizedEndpoint}, priority: ${selected.priority || 50}）`
+      `🤖 选择 Droid 账号 ${selected.name || selected.id}（endpoint: ${normalizedEndpoint}, priority: ${selected.priority || 50}${preferredAccount ? ', API Key 优先账号' : ''}）`
     )
 
     return selected

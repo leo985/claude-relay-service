@@ -425,7 +425,8 @@ async function handleChatCompletion(req, res, apiKeyData) {
 
       // 处理错误响应
       if (claudeResponse.statusCode >= 400) {
-        return res.status(claudeResponse.statusCode).json({
+        const clientStatus = claudeResponse.statusCode === 429 ? 503 : claudeResponse.statusCode
+        return res.status(clientStatus).json({
           error: {
             message: claudeData.error?.message || 'Claude API error',
             type: claudeData.error?.type || 'api_error',
@@ -526,7 +527,8 @@ async function handleChatCompletion(req, res, apiKeyData) {
         res.status(499).end()
       } else {
         const status = error.status || 500
-        res.status(status).json({
+        const clientStatus = status === 429 ? 503 : status
+        res.status(clientStatus).json({
           error: {
             message: getSafeMessage(error),
             type: 'server_error',

@@ -4,6 +4,11 @@ const accountGroupService = require('../accountGroupService')
 const redis = require('../../models/redis')
 const logger = require('../../utils/logger')
 const { isSchedulable, isActive, sortAccountsByPriority } = require('../../utils/commonHelper')
+const {
+  isPreferredAccountMatch,
+  normalizePreferredAccountRef,
+  pickPreferredAccount
+} = require('../../utils/accountPreferenceHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 
 const OAUTH_PROVIDER_GEMINI_CLI = 'gemini-cli'
@@ -696,7 +701,12 @@ class UnifiedGeminiScheduler {
   }
 
   // 👥 从分组中选择账户（支持 Gemini OAuth 和 Gemini API 两种账户类型）
-  async selectAccountFromGroup(groupId, sessionHash = null, requestedModel = null) {
+  async selectAccountFromGroup(
+    groupId,
+    sessionHash = null,
+    requestedModel = null,
+    apiKeyData = null
+  ) {
     try {
       // 获取分组信息
       const group = await accountGroupService.getGroup(groupId)
@@ -709,35 +719,49 @@ class UnifiedGeminiScheduler {
       }
 
       logger.info(`👥 Selecting account from Gemini group: ${group.name}`)
+      const preferredAccountRef = normalizePreferredAccountRef(
+        apiKeyData?.preferredGeminiAccountId,
+        'gemini'
+      )
 
       // 如果有会话哈希，检查是否有已映射的账户
       if (sessionHash) {
         const mappedAccount = await this._getSessionMapping(sessionHash)
         if (mappedAccount) {
-          // 验证映射的账户是否属于这个分组
-          const memberIds = await accountGroupService.getGroupMembers(groupId)
-          if (memberIds.includes(mappedAccount.accountId)) {
-            const isAvailable = await this._isAccountAvailable(
-              mappedAccount.accountId,
-              mappedAccount.accountType
+          if (
+            preferredAccountRef &&
+            !isPreferredAccountMatch(mappedAccount, preferredAccountRef)
+          ) {
+            logger.info(
+              `🎯 Sticky session account ${mappedAccount.accountId} is not the API key preferred account, selecting again`
             )
-            if (isAvailable) {
-              // 🚀 智能会话续期（续期 unified 映射键，按配置）
-              await this._extendSessionMappingTTL(sessionHash)
-              logger.info(
-                `🎯 Using sticky session account from group: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${sessionHash}`
+            await this._deleteSessionMapping(sessionHash)
+          } else {
+            // 验证映射的账户是否属于这个分组
+            const memberIds = await accountGroupService.getGroupMembers(groupId)
+            if (memberIds.includes(mappedAccount.accountId)) {
+              const isAvailable = await this._isAccountAvailable(
+                mappedAccount.accountId,
+                mappedAccount.accountType
               )
-              // 更新账户的最后使用时间（根据账户类型调用正确的服务）
-              if (mappedAccount.accountType === 'gemini-api') {
-                await geminiApiAccountService.markAccountUsed(mappedAccount.accountId)
-              } else {
-                await geminiAccountService.markAccountUsed(mappedAccount.accountId)
+              if (isAvailable) {
+                // 🚀 智能会话续期（续期 unified 映射键，按配置）
+                await this._extendSessionMappingTTL(sessionHash)
+                logger.info(
+                  `🎯 Using sticky session account from group: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${sessionHash}`
+                )
+                // 更新账户的最后使用时间（根据账户类型调用正确的服务）
+                if (mappedAccount.accountType === 'gemini-api') {
+                  await geminiApiAccountService.markAccountUsed(mappedAccount.accountId)
+                } else {
+                  await geminiAccountService.markAccountUsed(mappedAccount.accountId)
+                }
+                return mappedAccount
               }
-              return mappedAccount
             }
+            // 如果映射的账户不可用或不在分组中，删除映射
+            await this._deleteSessionMapping(sessionHash)
           }
-          // 如果映射的账户不可用或不在分组中，删除映射
-          await this._deleteSessionMapping(sessionHash)
         }
       }
 
@@ -824,11 +848,13 @@ class UnifiedGeminiScheduler {
         throw new Error(`No available accounts in Gemini group ${group.name}`)
       }
 
-      // 使用现有的优先级排序逻辑
+      const preferredAccount = pickPreferredAccount(
+        availableAccounts,
+        apiKeyData?.preferredGeminiAccountId,
+        'gemini'
+      )
       const sortedAccounts = sortAccountsByPriority(availableAccounts)
-
-      // 选择第一个账户
-      const selectedAccount = sortedAccounts[0]
+      const selectedAccount = preferredAccount || sortedAccounts[0]
 
       // 如果有会话哈希，建立新的映射
       if (sessionHash) {
@@ -843,7 +869,7 @@ class UnifiedGeminiScheduler {
       }
 
       logger.info(
-        `🎯 Selected account from Gemini group ${group.name}: ${selectedAccount.name} (${selectedAccount.accountId}, ${selectedAccount.accountType}) with priority ${selectedAccount.priority}`
+        `🎯 Selected account from Gemini group ${group.name}: ${selectedAccount.name} (${selectedAccount.accountId}, ${selectedAccount.accountType}) with priority ${selectedAccount.priority}${preferredAccount ? ' (preferred by API key)' : ''}`
       )
 
       // 更新账户的最后使用时间（根据账户类型调用正确的服务）

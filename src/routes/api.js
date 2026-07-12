@@ -35,6 +35,65 @@ const {
 const { getRequestFeaturesFromBody } = require('../utils/openaiCompatible')
 const router = express.Router()
 
+function buildAllUpstreamRateLimitedPayload() {
+  return {
+    error: 'service_unavailable',
+    message: 'All upstream accounts are temporarily rate limited. Please retry shortly.',
+    code: 'upstream_accounts_rate_limited'
+  }
+}
+
+function convertUpstreamRateLimitResponse(response = {}) {
+  return {
+    ...response,
+    statusCode: 503,
+    headers: {
+      ...(response.headers || {}),
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(buildAllUpstreamRateLimitedPayload())
+  }
+}
+
+function isRetryableUpstreamRateLimitError(error) {
+  return (
+    error?.code === 'UPSTREAM_RATE_LIMIT_RETRYABLE' ||
+    error?.code === 'CLAUDE_UPSTREAM_RATE_LIMIT_RETRYABLE'
+  )
+}
+
+function addUpstreamRateLimitFailedAccount(req, accountId) {
+  const failedAccountIds = Array.isArray(req._upstreamRateLimitFailedAccountIds)
+    ? req._upstreamRateLimitFailedAccountIds.filter(Boolean)
+    : []
+  const alreadyFailed = Boolean(accountId && failedAccountIds.includes(accountId))
+  req._upstreamRateLimitFailedAccountIds = [
+    ...new Set([...failedAccountIds, accountId].filter(Boolean))
+  ]
+  return {
+    alreadyFailed,
+    failedAccountIds: req._upstreamRateLimitFailedAccountIds
+  }
+}
+
+function getUpstreamRateLimitSchedulingFeatures(req) {
+  const failedAccountIds = Array.isArray(req._upstreamRateLimitFailedAccountIds)
+    ? req._upstreamRateLimitFailedAccountIds.filter(Boolean)
+    : []
+  return failedAccountIds.length > 0 ? { excludeAccountIds: failedAccountIds } : {}
+}
+
+function isNoAvailableClaudeAccountError(error) {
+  const message = error?.message || ''
+  return (
+    error?.code === 'UPSTREAM_RATE_LIMIT_ACCOUNTS_EXHAUSTED' ||
+    message.includes('No available Claude accounts') ||
+    message.includes('No available accounts in group') ||
+    message.includes('No available CCR accounts') ||
+    message.includes('has no members')
+  )
+}
+
 function queueRateLimitUpdate(
   rateLimitInfo,
   usageSummary,
@@ -229,7 +288,8 @@ function createCountTokensError(message, statusCode = 500, type = 'server_error'
 }
 
 function getCountTokensErrorStatus(error) {
-  return error?.httpStatus || error?.statusCode || 500
+  const statusCode = error?.httpStatus || error?.statusCode || 500
+  return statusCode === 429 ? 503 : statusCode
 }
 
 function getCountTokensErrorPayload(error) {
@@ -324,6 +384,12 @@ async function handleMessagesRequest(req, res) {
     // 🔄 并发满额重试标志：最多重试一次（使用req对象存储状态）
     if (req._concurrencyRetryAttempted === undefined) {
       req._concurrencyRetryAttempted = false
+    }
+    if (req._upstreamRateLimitRetryCount === undefined) {
+      req._upstreamRateLimitRetryCount = 0
+    }
+    if (!Array.isArray(req._upstreamRateLimitFailedAccountIds)) {
+      req._upstreamRateLimitFailedAccountIds = []
     }
 
     // 严格的输入验证
@@ -514,7 +580,8 @@ async function handleMessagesRequest(req, res) {
           req.apiKey,
           sessionHash,
           requestedModel,
-          forcedAccount
+          forcedAccount,
+          getUpstreamRateLimitSchedulingFeatures(req)
         )
         ;({ accountId, accountType } = selection)
       } catch (error) {
@@ -738,7 +805,9 @@ async function handleMessagesRequest(req, res) {
                 JSON.stringify(usageData)
               )
             }
-          }
+          },
+          null,
+          getUpstreamRateLimitSchedulingFeatures(req)
         )
       } else if (accountType === 'claude-console') {
         // Claude Console账号使用Console转发服务（需要传递accountId）
@@ -1242,7 +1311,8 @@ async function handleMessagesRequest(req, res) {
           req.apiKey,
           sessionHash,
           requestedModel,
-          forcedAccountNonStream
+          forcedAccountNonStream,
+          getUpstreamRateLimitSchedulingFeatures(req)
         )
         ;({ accountId, accountType } = selection)
       } catch (error) {
@@ -1338,7 +1408,8 @@ async function handleMessagesRequest(req, res) {
           _apiKeyNonStream,
           req, // clientRequest 用于断开检测，保留但服务层已优化
           res,
-          _headersNonStream
+          _headersNonStream,
+          getUpstreamRateLimitSchedulingFeatures(req)
         )
       } else if (accountType === 'claude-console') {
         // Claude Console账号使用Console转发服务
@@ -1421,6 +1492,28 @@ async function handleMessagesRequest(req, res) {
           `⚠️ Client disconnected before non-stream response could be sent for key: ${req.apiKey?.name || 'unknown'}`
         )
         return undefined
+      }
+
+      if (response.statusCode === 429) {
+        const failedAccountId = response.accountId || accountId
+        const { alreadyFailed, failedAccountIds } = addUpstreamRateLimitFailedAccount(
+          req,
+          failedAccountId
+        )
+        const canRetryRateLimit =
+          Boolean(failedAccountId) && !alreadyFailed && !res.headersSent && !res.writableEnded
+
+        if (canRetryRateLimit) {
+          req._upstreamRateLimitRetryCount += 1
+          const retrySessionHash = sessionHelper.generateSessionHash(req.body)
+          await unifiedClaudeScheduler.clearSessionMapping(retrySessionHash).catch(() => {})
+          logger.warn(
+            `🔁 Retrying Claude request after upstream 429; excluded ${failedAccountIds.length} failed account(s)`
+          )
+          return await handleMessagesRequest(req, res)
+        }
+
+        response = convertUpstreamRateLimitResponse(response)
       }
 
       res.status(response.statusCode)
@@ -1624,6 +1717,46 @@ async function handleMessagesRequest(req, res) {
       }
     }
 
+    if (isRetryableUpstreamRateLimitError(handledError)) {
+      const { alreadyFailed, failedAccountIds } = addUpstreamRateLimitFailedAccount(
+        req,
+        handledError.accountId
+      )
+      const canRetryRateLimit =
+        Boolean(handledError.accountId) && !alreadyFailed && !res.headersSent && !res.writableEnded
+
+      if (canRetryRateLimit) {
+        req._upstreamRateLimitRetryCount += 1
+        const sessionHash = sessionHelper.generateSessionHash(req.body)
+        await unifiedClaudeScheduler.clearSessionMapping(sessionHash).catch(() => {})
+        logger.warn(
+          `🔁 Retrying Claude stream request after upstream 429; excluded ${failedAccountIds.length} failed account(s)`
+        )
+        return await handleMessagesRequest(req, res)
+      }
+
+      if (!res.headersSent) {
+        return res.status(503).json(buildAllUpstreamRateLimitedPayload())
+      }
+      if (!res.destroyed && !res.finished) {
+        res.end()
+      }
+      return undefined
+    }
+
+    if (
+      req._upstreamRateLimitFailedAccountIds.length > 0 &&
+      isNoAvailableClaudeAccountError(handledError)
+    ) {
+      if (!res.headersSent) {
+        return res.status(503).json(buildAllUpstreamRateLimitedPayload())
+      }
+      if (!res.destroyed && !res.finished) {
+        res.end()
+      }
+      return undefined
+    }
+
     logger.error('❌ Claude relay error:', handledError.message, {
       code: handledError.code,
       stack: handledError.stack
@@ -1656,6 +1789,10 @@ async function handleMessagesRequest(req, res) {
       ) {
         statusCode = 502
         errorType = 'Upstream hostname resolution failed'
+      }
+
+      if (statusCode === 429) {
+        return res.status(503).json(buildAllUpstreamRateLimitedPayload())
       }
 
       if (errorType.startsWith('Upstream') || handledError.response) {
@@ -2153,7 +2290,14 @@ async function handleCountTokensRequest(req, res) {
           code: error.code,
           message: error.message
         })
-        return res.status(error.statusCode).json(getCountTokensErrorPayload(error))
+        const clientStatus = error.statusCode === 429 ? 503 : error.statusCode
+        return res
+          .status(clientStatus)
+          .json(
+            error.statusCode === 429
+              ? buildAllUpstreamRateLimitedPayload()
+              : getCountTokensErrorPayload(error)
+          )
       }
 
       // 客户端断开连接不是错误，使用 INFO 级别

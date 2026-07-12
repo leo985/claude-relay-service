@@ -36,6 +36,18 @@ function checkPermissions(apiKeyData, requiredPermission = 'gemini') {
   return apiKeyService.hasPermission(apiKeyData?.permissions, requiredPermission)
 }
 
+function buildGeminiRateLimitFallback(error) {
+  return {
+    error: {
+      message:
+        error?.message ||
+        'All upstream accounts are temporarily rate limited. Please retry shortly.',
+      type: 'service_unavailable',
+      code: 'upstream_accounts_rate_limited'
+    }
+  }
+}
+
 // 转换 OpenAI 消息格式到 Gemini 格式
 function convertMessagesToGemini(messages) {
   const contents = []
@@ -695,15 +707,19 @@ router.post('/v1/chat/completions', authenticateApiKey, async (req, res) => {
         res.status(499).end()
       } else {
         // 返回 OpenAI 格式的错误响应
-        const status = error.status || 500
-        const errorResponse = {
-          error: error.error || {
-            message: error.message || 'Internal server error',
-            type: 'server_error',
-            code: 'internal_error'
+        const status = error.status || error.response?.status || 500
+        if (status === 429) {
+          res.status(503).json(buildGeminiRateLimitFallback(error))
+        } else {
+          const errorResponse = {
+            error: error.error || {
+              message: error.message || 'Internal server error',
+              type: 'server_error',
+              code: 'internal_error'
+            }
           }
+          res.status(status).json(errorResponse)
         }
-        res.status(status).json(errorResponse)
       }
     }
   } finally {

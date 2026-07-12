@@ -3026,6 +3026,17 @@ const getBoundAccountName = (accountId) => {
     return `${realAccountId.substring(0, 8)}`
   }
 
+  if (accountId.startsWith('console:')) {
+    const realAccountId = accountId.replace('console:', '')
+    const consoleAccount = accounts.value.claude.find(
+      (acc) => acc.id === realAccountId && acc.platform === 'claude-console'
+    )
+    if (consoleAccount) {
+      return `${consoleAccount.name}`
+    }
+    return `${realAccountId.substring(0, 8)}`
+  }
+
   // 从Gemini账户列表中查找
   const geminiAccount = accounts.value.gemini.find((acc) => acc.id === accountId)
   if (geminiAccount) {
@@ -3085,11 +3096,14 @@ const hasAnyBinding = (key) => {
 }
 
 // 获取Claude绑定信息
+const formatPreferredBindingInfo = (preferredAccountId) =>
+  preferredAccountId ? `（优先：${getBoundAccountName(preferredAccountId)}）` : ''
+
 const getClaudeBindingInfo = (key) => {
   if (key.claudeAccountId) {
     const info = getBoundAccountName(key.claudeAccountId)
     if (key.claudeAccountId.startsWith('group:')) {
-      return info
+      return `${info}${formatPreferredBindingInfo(key.preferredClaudeAccountId)}`
     }
     // 检查账户是否存在
     const account = accounts.value.claude.find((acc) => acc.id === key.claudeAccountId)
@@ -3118,7 +3132,7 @@ const getGeminiBindingInfo = (key) => {
   if (key.geminiAccountId) {
     const info = getBoundAccountName(key.geminiAccountId)
     if (key.geminiAccountId.startsWith('group:')) {
-      return info
+      return `${info}${formatPreferredBindingInfo(key.preferredGeminiAccountId)}`
     }
 
     // 处理 api: 前缀的 Gemini-API 账户
@@ -3154,7 +3168,7 @@ const getOpenAIBindingInfo = (key) => {
   if (key.openaiAccountId) {
     const info = getBoundAccountName(key.openaiAccountId)
     if (key.openaiAccountId.startsWith('group:')) {
-      return info
+      return `${info}${formatPreferredBindingInfo(key.preferredOpenaiAccountId)}`
     }
 
     // 处理 responses: 前缀的 OpenAI-Responses 账户
@@ -3202,7 +3216,7 @@ const getDroidBindingInfo = (key) => {
   if (key.droidAccountId) {
     const info = getBoundAccountName(key.droidAccountId)
     if (key.droidAccountId.startsWith('group:')) {
-      return info
+      return `${info}${formatPreferredBindingInfo(key.preferredDroidAccountId)}`
     }
     const account = accounts.value.droid.find((acc) => acc.id === key.droidAccountId)
     if (!account) {
@@ -4521,9 +4535,13 @@ const exportToExcel = () => {
         Claude控制台账户: key.claudeConsoleAccountId || '',
         Gemini专属账户: key.geminiAccountId || '',
         OpenAI专属账户: key.openaiAccountId || '',
+        Claude组内优先账户: key.preferredClaudeAccountId || '',
+        Gemini组内优先账户: key.preferredGeminiAccountId || '',
+        OpenAI组内优先账户: key.preferredOpenaiAccountId || '',
         'Azure OpenAI专属账户': key.azureOpenaiAccountId || '',
         Bedrock专属账户: key.bedrockAccountId || '',
         Droid专属账户: key.droidAccountId || '',
+        Droid组内优先账户: key.preferredDroidAccountId || '',
 
         // 模型和客户端限制
         启用模型限制: key.enableModelRestriction ? '是' : '否',

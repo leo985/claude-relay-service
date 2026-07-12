@@ -464,6 +464,40 @@ async function updateAccountUsage(accountId, tokens) {
   logger.debug(`Updated Azure OpenAI account ${accountId} usage: ${tokens} tokens`)
 }
 
+async function markAccountRateLimited(accountId, duration = null) {
+  const account = await getAccount(accountId)
+  if (!account) {
+    throw new Error('Account not found')
+  }
+  if (account.disableAutoProtection === true || account.disableAutoProtection === 'true') {
+    await upstreamErrorHelper
+      .recordErrorHistory(accountId, 'azure-openai', 429, 'rate_limit')
+      .catch(() => {})
+    return { success: true, skipped: true }
+  }
+
+  const durationMinutes = duration || parseInt(account.rateLimitDuration, 10) || 60
+  const now = new Date()
+  const resetAt = new Date(now.getTime() + durationMinutes * 60 * 1000)
+  await updateAccount(accountId, {
+    status: 'rateLimited',
+    errorMessage: `Rate limited until ${resetAt.toISOString()}`,
+    rateLimitedAt: now.toISOString(),
+    rateLimitStatus: 'limited',
+    rateLimitResetAt: resetAt.toISOString(),
+    rateLimitDuration: String(durationMinutes),
+    schedulable: 'false'
+  })
+  logger.warn(
+    `Azure OpenAI account ${account.name} marked as rate limited until ${resetAt.toISOString()}`
+  )
+  return {
+    success: true,
+    rateLimitedAt: now.toISOString(),
+    rateLimitResetAt: resetAt.toISOString()
+  }
+}
+
 // 健康检查单个账户
 async function healthCheckAccount(accountId) {
   try {
@@ -618,6 +652,7 @@ module.exports = {
   getSharedAccounts,
   selectAvailableAccount,
   updateAccountUsage,
+  markAccountRateLimited,
   healthCheckAccount,
   performHealthChecks,
   toggleSchedulable,

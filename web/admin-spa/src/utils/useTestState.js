@@ -5,6 +5,7 @@ export const useTestState = () => {
   const testStatus = ref('idle') // idle, testing, success, error
   const responseText = ref('')
   const errorMessage = ref('')
+  const resultData = ref(null)
   const testDuration = ref(0)
   const testStartTime = ref(null)
   const abortController = ref(null)
@@ -128,6 +129,7 @@ export const useTestState = () => {
     testStatus.value = 'testing'
     responseText.value = ''
     errorMessage.value = ''
+    resultData.value = null
     testDuration.value = 0
     testStartTime.value = Date.now()
 
@@ -147,28 +149,37 @@ export const useTestState = () => {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.message || errorData.error || `HTTP ${response.status}`)
+        const requestError = new Error(
+          errorData.message || errorData.error || `HTTP ${response.status}`
+        )
+        requestError.data = errorData
+        throw requestError
       }
 
       if (useSSE) {
         await readSSEStream(response)
+        return { success: testStatus.value === 'success', data: resultData.value }
       } else {
         // JSON 响应
         const data = await response.json()
+        resultData.value = data.data || null
         testDuration.value = Date.now() - testStartTime.value
         if (data.success) {
           testStatus.value = 'success'
-          responseText.value = data.data?.responseText || 'Test passed'
+          responseText.value = data.data?.responseText || data.data?.message || 'Test passed'
         } else {
           testStatus.value = 'error'
-          errorMessage.value = data.message || 'Test failed'
+          errorMessage.value = data.data?.error || data.message || 'Test failed'
         }
+        return data
       }
     } catch (err) {
-      if (err.name === 'AbortError') return
+      if (err.name === 'AbortError') return null
+      resultData.value = err.data?.data || null
       testStatus.value = 'error'
       errorMessage.value = err.message || '连接失败'
       testDuration.value = Date.now() - testStartTime.value
+      return err.data || null
     }
   }
 
@@ -177,6 +188,7 @@ export const useTestState = () => {
     testStatus.value = 'idle'
     responseText.value = ''
     errorMessage.value = ''
+    resultData.value = null
     testDuration.value = 0
     testStartTime.value = null
   }
@@ -194,6 +206,7 @@ export const useTestState = () => {
     testStatus,
     responseText,
     errorMessage,
+    resultData,
     testDuration,
     statusTitle,
     statusCardClass,

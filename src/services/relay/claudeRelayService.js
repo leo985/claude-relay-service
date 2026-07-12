@@ -521,7 +521,9 @@ class ClaudeRelayService {
         accountSelection = await unifiedClaudeScheduler.selectAccountForApiKey(
           apiKeyData,
           sessionHash,
-          requestBody.model
+          requestBody.model,
+          null,
+          { excludeAccountIds: options.excludeAccountIds }
         )
       } catch (error) {
         if (error.code === 'CLAUDE_DEDICATED_RATE_LIMITED') {
@@ -1884,7 +1886,9 @@ class ClaudeRelayService {
         accountSelection = await unifiedClaudeScheduler.selectAccountForApiKey(
           apiKeyData,
           sessionHash,
-          requestBody.model
+          requestBody.model,
+          null,
+          { excludeAccountIds: options.excludeAccountIds }
         )
       } catch (error) {
         if (error.code === 'CLAUDE_DEDICATED_RATE_LIMITED') {
@@ -2194,11 +2198,11 @@ class ClaudeRelayService {
               )
               if (isStreamWritable(responseStream)) {
                 const safeErrorPayload = upstreamErrorHelper.buildSafeUpstreamErrorForClient(
-                  429,
+                  503,
                   this._parseErrorBody(errorBody429),
                   { format: 'anthropic' }
                 )
-                const safeMessage = safeErrorPayload.error?.message || 'Claude API error: 429'
+                const safeMessage = safeErrorPayload.error?.message || 'Claude API error: 503'
                 if (toolNameStreamTransformer) {
                   responseStream.write(
                     `data: ${JSON.stringify({ type: 'error', error: safeMessage })}\n\n`
@@ -2208,14 +2212,16 @@ class ClaudeRelayService {
                   responseStream.write(
                     `data: ${JSON.stringify({
                       ...safeErrorPayload,
-                      status: 429,
+                      status: 503,
                       timestamp: new Date().toISOString()
                     })}\n\n`
                   )
                 }
                 responseStream.end()
               }
-              reject(new Error(`Claude API error: 429`))
+              const extraUsageError = new Error('Claude API error: 503')
+              extraUsageError.statusCode = 503
+              reject(extraUsageError)
               return
             }
 
@@ -2224,6 +2230,9 @@ class ClaudeRelayService {
               ? res.headers['anthropic-ratelimit-unified-reset']
               : null
             const parsedResetTimestamp = resetHeader ? parseInt(resetHeader, 10) : NaN
+            const retryableRateLimitResetTimestamp = Number.isNaN(parsedResetTimestamp)
+              ? null
+              : parsedResetTimestamp
 
             if (isOpusModelRequest) {
               if (!Number.isNaN(parsedResetTimestamp)) {
@@ -2253,9 +2262,7 @@ class ClaudeRelayService {
                 return
               }
             } else {
-              const rateLimitResetTimestamp = Number.isNaN(parsedResetTimestamp)
-                ? null
-                : parsedResetTimestamp
+              const rateLimitResetTimestamp = retryableRateLimitResetTimestamp
               const isAgentViewAuxiliaryRequest = this._isAgentViewAuxiliaryRequest(
                 body,
                 clientHeaders
@@ -2302,7 +2309,7 @@ class ClaudeRelayService {
               }
             }
 
-            // 非专属账户的真正限流：透传错误给客户端（body 已读完，无需 fall-through）
+            // 非专属账户的真正限流：交给路由层换号重试；重试耗尽后再返回 503。
             logger.error(
               `❌ Claude API returned error status: 429 | Account: ${account?.name || accountId}`
             )
@@ -2310,30 +2317,13 @@ class ClaudeRelayService {
               `❌ Claude API error response (Account: ${account?.name || accountId}):`,
               errorBody429
             )
-            if (isStreamWritable(responseStream)) {
-              const safeErrorPayload = upstreamErrorHelper.buildSafeUpstreamErrorForClient(
-                429,
-                this._parseErrorBody(errorBody429),
-                { format: 'anthropic' }
-              )
-              const safeMessage = safeErrorPayload.error?.message || 'Claude API error: 429'
-              if (toolNameStreamTransformer) {
-                responseStream.write(
-                  `data: ${JSON.stringify({ type: 'error', error: safeMessage })}\n\n`
-                )
-              } else {
-                responseStream.write('event: error\n')
-                responseStream.write(
-                  `data: ${JSON.stringify({
-                    ...safeErrorPayload,
-                    status: 429,
-                    timestamp: new Date().toISOString()
-                  })}\n\n`
-                )
-              }
-              responseStream.end()
-            }
-            reject(new Error(`Claude API error: 429`))
+            const retryError = new Error('Upstream Claude account rate limited')
+            retryError.code = 'UPSTREAM_RATE_LIMIT_RETRYABLE'
+            retryError.statusCode = 429
+            retryError.accountId = accountId
+            retryError.accountType = accountType
+            retryError.rateLimitResetTimestamp = retryableRateLimitResetTimestamp
+            reject(retryError)
             return
           }
 

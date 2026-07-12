@@ -74,6 +74,7 @@ const openaiResponsesAccountService = require('../src/services/account/openaiRes
 const { extractOpenAICacheReadTokens } = require('../src/utils/requestDetailHelper')
 const { updateRateLimitCounters } = require('../src/utils/rateLimitHelper')
 const logger = require('../src/utils/logger')
+const upstreamErrorHelper = require('../src/utils/upstreamErrorHelper')
 const axios = require('axios')
 
 function createReq(overrides = {}) {
@@ -741,6 +742,111 @@ describe('openaiResponsesRelayService usage accounting', () => {
     })
 
     expect(result.body.enable_thinking).toBe(false)
+  })
+})
+
+describe('openaiResponsesRelayService upstream 429 handling', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    axios.mockReset()
+    upstreamErrorHelper.markTempUnavailable.mockResolvedValue()
+    apiKeyService.recordUsage.mockResolvedValue({ realCost: 0, ratedCost: 0 })
+    openaiResponsesAccountService.updateAccount.mockResolvedValue()
+    openaiResponsesAccountService.updateAccountUsage.mockResolvedValue()
+    openaiResponsesAccountService.updateUsageQuota.mockResolvedValue()
+    updateRateLimitCounters.mockResolvedValue({ totalTokens: 0, ratedCost: 0 })
+  })
+
+  test('keeps switching OpenAI-Responses accounts after 429 until one succeeds', async () => {
+    openaiResponsesAccountService.getAccount.mockImplementation(async (id) => ({
+      id,
+      name: id === 'acct-1' ? 'Primary' : 'Backup',
+      apiKey: `sk-${id}`,
+      baseApi: 'https://api.example.com',
+      providerEndpoint: 'responses'
+    }))
+    axios
+      .mockResolvedValueOnce({
+        status: 429,
+        data: { error: { message: 'rate limited', resets_in_seconds: 30 } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 429,
+        data: { error: { message: 'rate limited', resets_in_seconds: 30 } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { id: 'resp-1', model: 'gpt-4.1' },
+        headers: {}
+      })
+
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+    const selectRetryAccount = jest
+      .fn()
+      .mockResolvedValueOnce({ id: 'acct-2', name: 'Backup 1' })
+      .mockResolvedValueOnce({ id: 'acct-3', name: 'Backup 2' })
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      { selectRetryAccount }
+    )
+
+    expect(selectRetryAccount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'rate_limit',
+        statusCode: 429,
+        failedAccountIds: ['acct-1'],
+        resetsInSeconds: 30
+      })
+    )
+    expect(selectRetryAccount).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        failedAccountIds: ['acct-1', 'acct-2']
+      })
+    )
+    expect(axios).toHaveBeenCalledTimes(3)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.status).not.toHaveBeenCalledWith(429)
+  })
+
+  test('returns 503 instead of 429 when no alternate account is available', async () => {
+    openaiResponsesAccountService.getAccount.mockResolvedValue({
+      id: 'acct-1',
+      name: 'Primary',
+      apiKey: 'sk-primary',
+      baseApi: 'https://api.example.com',
+      providerEndpoint: 'responses'
+    })
+    axios.mockResolvedValueOnce({
+      status: 429,
+      data: { error: { message: 'rate limited', resets_in_seconds: 45 } },
+      headers: {}
+    })
+
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      {
+        selectRetryAccount: jest.fn().mockResolvedValue(null)
+      }
+    )
+
+    expect(axios).toHaveBeenCalledTimes(1)
+    expect(res.status).toHaveBeenCalledWith(503)
+    expect(res.status).not.toHaveBeenCalledWith(429)
+    expect(res.headers['Retry-After']).toBe('45')
+    expect(res.payload.error.code).toBe('upstream_accounts_rate_limited')
   })
 })
 

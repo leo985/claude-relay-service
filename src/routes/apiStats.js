@@ -6,6 +6,7 @@ const CostCalculator = require('../utils/costCalculator')
 const claudeAccountService = require('../services/account/claudeAccountService')
 const openaiAccountService = require('../services/account/openaiAccountService')
 const serviceRatesService = require('../services/serviceRatesService')
+const modelService = require('../services/modelService')
 const config = require('../../config/config')
 const {
   createClaudeTestPayload,
@@ -20,6 +21,85 @@ const {
 } = require('../utils/apiStatsModelDisplay')
 
 const router = express.Router()
+
+function toModelOption(model) {
+  const id = String(model?.id || model?.value || model || '').trim()
+  if (!id) {
+    return null
+  }
+  return {
+    value: id,
+    label: model?.label || id,
+    provider: model?.owned_by || model?.provider || ''
+  }
+}
+
+function filterModelOptions(models, predicate) {
+  const seen = new Set()
+  const result = []
+  for (const model of models || []) {
+    if (!predicate(model)) {
+      continue
+    }
+    const option = toModelOption(model)
+    if (!option || seen.has(option.value)) {
+      continue
+    }
+    seen.add(option.value)
+    result.push(option)
+  }
+  return result
+}
+
+function modelMatchesProvider(model, provider) {
+  const id = String(model?.id || model?.value || model || '').toLowerCase()
+  const owner = String(model?.owned_by || model?.provider || '').toLowerCase()
+  if (provider === 'anthropic') {
+    return owner.includes('anthropic') || owner.includes('claude') || id.includes('claude')
+  }
+  if (provider === 'google') {
+    return owner.includes('google') || owner.includes('gemini') || id.includes('gemini')
+  }
+  if (provider === 'openai') {
+    return (
+      owner.includes('openai') ||
+      owner.includes('codex') ||
+      /^gpt[-.]/.test(id) ||
+      id.startsWith('codex') ||
+      /^o\d/.test(id)
+    )
+  }
+  return false
+}
+
+function buildPublicModelGroups(models) {
+  const claude = filterModelOptions(models, (model) => modelMatchesProvider(model, 'anthropic'))
+  const gemini = filterModelOptions(models, (model) => modelMatchesProvider(model, 'google'))
+  const openai = filterModelOptions(models, (model) => modelMatchesProvider(model, 'openai'))
+  const known = new Set([...claude, ...gemini, ...openai].map((model) => model.value))
+  const other = filterModelOptions(models, (model) => !known.has(String(model.id || model.value)))
+
+  return {
+    claude,
+    gemini,
+    openai,
+    other,
+    all: [...claude, ...gemini, ...openai, ...other],
+    platforms: {
+      claude,
+      'claude-console': claude,
+      bedrock: modelsConfig.BEDROCK_MODELS,
+      gemini,
+      'gemini-api': gemini,
+      openai,
+      'openai-responses': [...openai, ...other],
+      'azure-openai': openai,
+      azure_openai: openai,
+      droid: [...claude, ...openai],
+      ccr: claude
+    }
+  }
+}
 
 async function getApiStatsModelDisplayMode() {
   const defaultMode = normalizeApiStatsModelDisplayMode(config.apiStats?.modelDisplayMode)
@@ -53,30 +133,29 @@ async function createModelStatsResponse(modelStats, period) {
 }
 
 // 📋 获取可用模型列表（公开接口）
-router.get('/models', (req, res) => {
-  const { service } = req.query
+router.get('/models', async (req, res) => {
+  try {
+    const { service } = req.query
+    const groups = buildPublicModelGroups(await modelService.getAllModels())
 
-  if (service) {
-    // 返回指定服务的模型
-    const models = modelsConfig.getModelsByService(service)
+    if (service) {
+      return res.json({
+        success: true,
+        data: groups[service] || []
+      })
+    }
+
     return res.json({
       success: true,
-      data: models
+      data: groups
+    })
+  } catch (error) {
+    logger.error('❌ Failed to get public model list:', error)
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get models'
     })
   }
-
-  // 返回所有模型（按服务分组 + 平台维度）
-  res.json({
-    success: true,
-    data: {
-      claude: modelsConfig.CLAUDE_MODELS,
-      gemini: modelsConfig.GEMINI_MODELS,
-      openai: modelsConfig.OPENAI_MODELS,
-      other: modelsConfig.OTHER_MODELS,
-      all: modelsConfig.getAllModels(),
-      platforms: modelsConfig.PLATFORM_TEST_MODELS
-    }
-  })
 })
 
 // 🏠 重定向页面请求到新版 admin-spa

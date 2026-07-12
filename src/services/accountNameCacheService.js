@@ -178,7 +178,7 @@ class AccountNameCacheService {
       return `分组-${groupId.substring(0, 8)}`
     }
 
-    // 直接查找（包括带前缀的 api:xxx, responses:xxx）
+    // 直接查找（包括带前缀的 api:xxx, responses:xxx, console:xxx）
     const cached = this.accountCache.get(accountId)
     if (cached) {
       return cached.name
@@ -190,6 +190,8 @@ class AccountNameCacheService {
       realId = accountId.substring(4)
     } else if (accountId.startsWith('responses:')) {
       realId = accountId.substring(10)
+    } else if (accountId.startsWith('console:')) {
+      realId = accountId.substring(8)
     }
 
     if (realId !== accountId) {
@@ -216,9 +218,13 @@ class AccountNameCacheService {
       { field: 'claudeConsoleAccountId', platform: 'Claude Console' },
       { field: 'geminiAccountId', platform: 'Gemini' },
       { field: 'openaiAccountId', platform: 'OpenAI' },
+      { field: 'preferredClaudeAccountId', platform: 'Claude 优先' },
+      { field: 'preferredGeminiAccountId', platform: 'Gemini 优先' },
+      { field: 'preferredOpenaiAccountId', platform: 'OpenAI 优先' },
       { field: 'azureOpenaiAccountId', platform: 'Azure OpenAI' },
       { field: 'bedrockAccountId', platform: 'Bedrock' },
       { field: 'droidAccountId', platform: 'Droid' },
+      { field: 'preferredDroidAccountId', platform: 'Droid 优先' },
       { field: 'ccrAccountId', platform: 'CCR' }
     ]
 

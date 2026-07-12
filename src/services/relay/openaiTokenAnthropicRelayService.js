@@ -451,8 +451,9 @@ class OpenAITokenAnthropicRelayService {
 
   async _handleErrorResponse({ res, account, response }) {
     const errorData = await this._readErrorBody(response)
+    let resetsInSeconds = null
     if (response.status === 429) {
-      const resetsInSeconds =
+      resetsInSeconds =
         errorData?.error?.resets_in_seconds ||
         errorData?.detail?.resets_in_seconds ||
         upstreamErrorHelper.parseRetryAfter(response.headers)
@@ -466,8 +467,13 @@ class OpenAITokenAnthropicRelayService {
         .catch(() => {})
     }
 
-    return res.status(response.status).json(
-      upstreamErrorHelper.buildSafeUpstreamErrorForClient(response.status, errorData, {
+    const clientStatus = response.status === 429 ? 503 : response.status
+    if (response.status === 429 && resetsInSeconds !== null && resetsInSeconds !== undefined) {
+      res.setHeader('Retry-After', String(resetsInSeconds))
+    }
+
+    return res.status(clientStatus).json(
+      upstreamErrorHelper.buildSafeUpstreamErrorForClient(clientStatus, errorData, {
         format: 'anthropic'
       })
     )

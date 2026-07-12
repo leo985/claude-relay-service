@@ -159,6 +159,7 @@ class OpenAIImageRelayService {
 
   async _handleErrorResponse({ res, account, response, sessionHash, operation }) {
     let errorData = response.data
+    let resetsInSeconds = null
 
     if (response.data && typeof response.data.pipe === 'function') {
       const chunks = []
@@ -177,7 +178,7 @@ class OpenAIImageRelayService {
     }
 
     if (response.status === 429) {
-      const resetsInSeconds =
+      resetsInSeconds =
         errorData?.error?.resets_in_seconds || upstreamErrorHelper.parseRetryAfter(response.headers)
       await unifiedOpenAIScheduler.markAccountRateLimited(
         account.id,
@@ -212,9 +213,14 @@ class OpenAIImageRelayService {
       errorData
     })
 
+    const clientStatus = response.status === 429 ? 503 : response.status
+    if (response.status === 429 && resetsInSeconds !== null && resetsInSeconds !== undefined) {
+      res.setHeader('Retry-After', String(resetsInSeconds))
+    }
+
     return res
-      .status(response.status)
-      .json(upstreamErrorHelper.sanitizeErrorForClient(errorData, { statusCode: response.status }))
+      .status(clientStatus)
+      .json(upstreamErrorHelper.sanitizeErrorForClient(errorData, { statusCode: clientStatus }))
   }
 
   async _getFullAccount(account) {
@@ -342,7 +348,8 @@ class OpenAIImageRelayService {
       }
 
       if (error.statusCode && !error.response) {
-        return res.status(error.statusCode).json({
+        const clientStatus = error.statusCode === 429 ? 503 : error.statusCode
+        return res.status(clientStatus).json({
           error: {
             message: error.message || 'Invalid request',
             type: error.code || 'invalid_request_error',
@@ -355,10 +362,14 @@ class OpenAIImageRelayService {
         error.statusCode ||
         error.response?.status ||
         (error.code === 'ETIMEDOUT' ? 504 : error.code === 'ECONNREFUSED' ? 502 : 500)
+      const clientStatus = status === 429 ? 503 : status
       return res
-        .status(status)
+        .status(clientStatus)
         .json(
-          upstreamErrorHelper.buildSafeUpstreamErrorForClient(status, error.response?.data || error)
+          upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+            clientStatus,
+            error.response?.data || error
+          )
         )
     } finally {
       if (handleClientDisconnect) {
@@ -482,7 +493,8 @@ class OpenAIImageRelayService {
       }
 
       if (error.statusCode && !error.response) {
-        return res.status(error.statusCode).json({
+        const clientStatus = error.statusCode === 429 ? 503 : error.statusCode
+        return res.status(clientStatus).json({
           error: {
             message: error.message || 'Invalid request',
             type: error.code || 'invalid_request_error',
@@ -495,10 +507,14 @@ class OpenAIImageRelayService {
         error.statusCode ||
         error.response?.status ||
         (error.code === 'ETIMEDOUT' ? 504 : error.code === 'ECONNREFUSED' ? 502 : 500)
+      const clientStatus = status === 429 ? 503 : status
       return res
-        .status(status)
+        .status(clientStatus)
         .json(
-          upstreamErrorHelper.buildSafeUpstreamErrorForClient(status, error.response?.data || error)
+          upstreamErrorHelper.buildSafeUpstreamErrorForClient(
+            clientStatus,
+            error.response?.data || error
+          )
         )
     } finally {
       if (handleClientDisconnect) {

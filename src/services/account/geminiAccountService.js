@@ -1125,18 +1125,44 @@ async function markAccountUsed(accountId) {
 }
 
 // 设置账户限流状态
-async function setAccountRateLimited(accountId, isLimited = true) {
+async function setAccountRateLimited(accountId, isLimited = true, duration = null) {
+  const account = await getAccount(accountId)
+  if (!account) {
+    throw new Error('Account not found')
+  }
+  if (
+    isLimited &&
+    (account.disableAutoProtection === true || account.disableAutoProtection === 'true')
+  ) {
+    await upstreamErrorHelper
+      .recordErrorHistory(accountId, 'gemini', 429, 'rate_limit')
+      .catch(() => {})
+    return { success: true, skipped: true }
+  }
+
+  const durationMinutes = duration || parseInt(account.rateLimitDuration, 10) || 60
+  const resetAt = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString()
   const updates = isLimited
     ? {
         rateLimitStatus: 'limited',
-        rateLimitedAt: new Date().toISOString()
+        rateLimitedAt: new Date().toISOString(),
+        rateLimitResetAt: resetAt,
+        rateLimitDuration: String(durationMinutes),
+        status: 'rateLimited',
+        schedulable: 'false',
+        errorMessage: `Rate limited until ${resetAt}`
       }
     : {
         rateLimitStatus: '',
-        rateLimitedAt: ''
+        rateLimitedAt: '',
+        rateLimitResetAt: '',
+        status: account.refreshToken ? 'active' : 'created',
+        schedulable: 'true',
+        errorMessage: ''
       }
 
   await updateAccount(accountId, updates)
+  return { success: true, rateLimitResetAt: isLimited ? resetAt : null }
 }
 
 // 获取账户的限流信息（参考 claudeAccountService 的实现）

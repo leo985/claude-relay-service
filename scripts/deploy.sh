@@ -151,7 +151,7 @@ fi
 # ---------- Step 2: 备份当前版本 ----------
 echo ""
 echo "[2/6] 备份服务器当前版本..."
-run "${SSH_CMD} 'mkdir -p ${BACKUP_DIR} && cd ${REMOTE_DIR} && tar --exclude=\"./node_modules\" --exclude=\"./logs\" --exclude=\"./data\" --exclude=\"./.env\" --exclude=\"./config/config.js\" --exclude=\"./sshkey.pem\" --exclude=\"./.git\" --exclude=\"./tmp\" --exclude=\"./coverage\" -czf ${BACKUP_PATH} .'"
+run "${SSH_CMD} 'mkdir -p ${BACKUP_DIR} && cd ${REMOTE_DIR} && tar --exclude=\"./node_modules\" --exclude=\"./web/admin-spa/node_modules\" --exclude=\"./logs\" --exclude=\"./data\" --exclude=\"./.env\" --exclude=\"./config/config.js\" --exclude=\"./sshkey.pem\" --exclude=\"./.git\" --exclude=\"./tmp\" --exclude=\"./coverage\" -czf ${BACKUP_PATH} .'"
 if [ "$DRY_RUN" = false ]; then
   BACKUP_CREATED=true
 fi
@@ -176,7 +176,12 @@ run "rsync -avz --delete \\
   --exclude='*.log' \\
   --exclude='tmp/' \\
   --exclude='.claude/' \\
+  --exclude='.idea/' \\
   --exclude='.mcp.json' \\
+  --exclude='redis_data/' \\
+  --exclude='img.png' \\
+  --exclude='tup.png' \\
+  --exclude='trae-client-characteristics.md' \\
   --exclude='claude-relay-service.pid' \\
   ${PROJECT_DIR}/ ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/"
 

@@ -21,7 +21,7 @@ jest.mock('../src/services/account/bedrockAccountService', () => ({
 
 jest.mock('../src/services/scheduler/unifiedClaudeScheduler', () => ({
   selectAccountForApiKey: jest.fn(),
-  clearSessionMapping: jest.fn()
+  clearSessionMapping: jest.fn().mockResolvedValue()
 }))
 
 jest.mock('../src/services/scheduler/unifiedOpenAIScheduler', () => ({
@@ -111,10 +111,12 @@ jest.mock('../src/utils/logger', () => ({
 
 const unifiedClaudeScheduler = require('../src/services/scheduler/unifiedClaudeScheduler')
 const unifiedOpenAIScheduler = require('../src/services/scheduler/unifiedOpenAIScheduler')
+const claudeRelayService = require('../src/services/relay/claudeRelayService')
 const claudeConsoleRelayService = require('../src/services/relay/claudeConsoleRelayService')
 const openaiResponsesRelayService = require('../src/services/relay/openaiResponsesRelayService')
 const openaiTokenAnthropicRelayService = require('../src/services/relay/openaiTokenAnthropicRelayService')
 const claudeRelayConfigService = require('../src/services/claudeRelayConfigService')
+const claudeAccountService = require('../src/services/account/claudeAccountService')
 const claudeConsoleAccountService = require('../src/services/account/claudeConsoleAccountService')
 const openaiResponsesAccountService = require('../src/services/account/openaiResponsesAccountService')
 const openaiAccountService = require('../src/services/account/openaiAccountService')
@@ -256,6 +258,100 @@ describe('/v1/messages OpenAI-Responses fallback', () => {
     )
     expect(openaiResponsesRelayService.handleRequest).not.toHaveBeenCalled()
     expect(res.status).toHaveBeenCalledWith(200)
+  })
+
+  it('keeps switching Claude accounts after 429 until one succeeds', async () => {
+    unifiedClaudeScheduler.selectAccountForApiKey
+      .mockResolvedValueOnce({
+        accountId: 'claude-1',
+        accountType: 'claude-official'
+      })
+      .mockResolvedValueOnce({
+        accountId: 'claude-2',
+        accountType: 'claude-official'
+      })
+      .mockResolvedValueOnce({
+        accountId: 'claude-3',
+        accountType: 'claude-official'
+      })
+      .mockResolvedValueOnce({
+        accountId: 'claude-4',
+        accountType: 'claude-official'
+      })
+    claudeAccountService.getAccount.mockImplementation(async (id) => ({
+      id,
+      interceptWarmup: 'false'
+    }))
+    claudeRelayService.relayRequest
+      .mockResolvedValueOnce({
+        statusCode: 429,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ error: { message: 'rate limited' } }),
+        accountId: 'claude-1'
+      })
+      .mockResolvedValueOnce({
+        statusCode: 429,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ error: { message: 'rate limited' } }),
+        accountId: 'claude-2'
+      })
+      .mockResolvedValueOnce({
+        statusCode: 429,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ error: { message: 'rate limited' } }),
+        accountId: 'claude-3'
+      })
+      .mockResolvedValueOnce({
+        statusCode: 200,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          id: 'msg-1',
+          model: 'claude-3-5-sonnet',
+          content: [],
+          usage: { input_tokens: 1, output_tokens: 1 }
+        }),
+        accountId: 'claude-4'
+      })
+
+    const res = createRes()
+    await handleMessagesRequest(createReq(), res)
+
+    expect(claudeRelayService.relayRequest).toHaveBeenCalledTimes(4)
+    expect(unifiedClaudeScheduler.selectAccountForApiKey.mock.calls[3][4]).toEqual({
+      excludeAccountIds: ['claude-1', 'claude-2', 'claude-3']
+    })
+    expect(claudeRelayService.relayRequest.mock.calls[3][5]).toEqual({
+      excludeAccountIds: ['claude-1', 'claude-2', 'claude-3']
+    })
+    expect(unifiedClaudeScheduler.clearSessionMapping).toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.status).not.toHaveBeenCalledWith(429)
+  })
+
+  it('returns 503 instead of 429 when Claude 429 retries are exhausted', async () => {
+    unifiedClaudeScheduler.selectAccountForApiKey
+      .mockResolvedValueOnce({
+        accountId: 'claude-1',
+        accountType: 'claude-official'
+      })
+      .mockRejectedValueOnce(new Error('No available accounts in group Test Group'))
+    claudeAccountService.getAccount.mockResolvedValueOnce({ id: 'claude-1', interceptWarmup: 'false' })
+    claudeRelayService.relayRequest.mockResolvedValueOnce({
+      statusCode: 429,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ error: { message: 'rate limited' } }),
+      accountId: 'claude-1'
+    })
+
+    const res = createRes()
+    await handleMessagesRequest(createReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(503)
+    expect(res.status).not.toHaveBeenCalledWith(429)
+    expect(res.payload).toMatchObject({
+      error: 'service_unavailable',
+      code: 'upstream_accounts_rate_limited'
+    })
   })
 })
 

@@ -291,6 +291,25 @@ class OpenAIResponsesRelayService {
     this.responsesAdapters = new OpenAIResponsesAdapters()
   }
 
+  _buildAllRateLimitedResponse(resetsInSeconds = null) {
+    const error = {
+      message: 'All upstream accounts are temporarily rate limited. Please retry shortly.',
+      type: 'service_unavailable',
+      code: 'upstream_accounts_rate_limited'
+    }
+    if (resetsInSeconds !== null && resetsInSeconds !== undefined) {
+      error.resets_in_seconds = resetsInSeconds
+    }
+    return { error }
+  }
+
+  _sendAllRateLimitedResponse(res, resetsInSeconds = null) {
+    if (resetsInSeconds !== null && resetsInSeconds !== undefined) {
+      res.setHeader('Retry-After', String(resetsInSeconds))
+    }
+    return res.status(503).json(this._buildAllRateLimitedResponse(resetsInSeconds))
+  }
+
   // 节流更新 lastUsedAt
   async _throttledUpdateLastUsedAt(accountId) {
     const now = Date.now()
@@ -865,9 +884,15 @@ class OpenAIResponsesRelayService {
     let abortController = null
     let handleClientDisconnect = null
     const retryAttempt = Number.isInteger(options.retryAttempt) ? options.retryAttempt : 0
+    const rateLimitRetryAttempt = Number.isInteger(options.rateLimitRetryAttempt)
+      ? options.rateLimitRetryAttempt
+      : 0
     const maxNetworkRetries = Number.isInteger(options.maxNetworkRetries)
       ? options.maxNetworkRetries
       : 0
+    const maxRateLimitRetries = Number.isInteger(options.maxRateLimitRetries)
+      ? options.maxRateLimitRetries
+      : null
     const failedAccountIds = Array.isArray(options.failedAccountIds)
       ? options.failedAccountIds.filter(Boolean)
       : []
@@ -984,19 +1009,52 @@ class OpenAIResponsesRelayService {
             .catch(() => {})
         }
 
-        // 返回错误响应（使用处理后的数据，避免循环引用）
-        const errorResponse = upstreamErrorHelper.sanitizeErrorForClient(
-          errorData || {
-            error: {
-              message: 'Rate limit exceeded',
-              type: 'rate_limit_error',
-              code: 'rate_limit_exceeded',
-              resets_in_seconds: resetsInSeconds
+        if (handleClientDisconnect) {
+          req.removeListener('close', handleClientDisconnect)
+          res.removeListener('close', handleClientDisconnect)
+          handleClientDisconnect = null
+        }
+
+        const nextFailedAccountIds = [
+          ...new Set([...failedAccountIds, account?.id].filter(Boolean))
+        ]
+        const canRetryRateLimit =
+          !res.headersSent &&
+          !res.writableEnded &&
+          !res.destroyed &&
+          (maxRateLimitRetries === null || rateLimitRetryAttempt < maxRateLimitRetries) &&
+          typeof options.selectRetryAccount === 'function'
+
+        if (canRetryRateLimit) {
+          try {
+            const retryAccount = await options.selectRetryAccount({
+              error: errorData,
+              failedAccount: account,
+              failedAccountIds: nextFailedAccountIds,
+              retryAttempt: rateLimitRetryAttempt,
+              reason: 'rate_limit',
+              statusCode: 429,
+              resetsInSeconds
+            })
+
+            if (retryAccount?.id && !nextFailedAccountIds.includes(retryAccount.id)) {
+              logger.warn(
+                `🔁 Retrying OpenAI-Responses request after upstream 429 with account ${retryAccount.name || retryAccount.id}`
+              )
+              return await this.handleRequest(req, res, retryAccount, apiKeyData, {
+                ...options,
+                rateLimitRetryAttempt: rateLimitRetryAttempt + 1,
+                failedAccountIds: nextFailedAccountIds
+              })
             }
-          },
-          { statusCode: 429, retryAfterSeconds: resetsInSeconds }
-        )
-        return res.status(429).json(errorResponse)
+
+            logger.warn('🔁 OpenAI-Responses 429 retry skipped: no alternate account available')
+          } catch (retryError) {
+            logger.warn('🔁 OpenAI-Responses 429 retry selection failed:', retryError)
+          }
+        }
+
+        return this._sendAllRateLimitedResponse(res, resetsInSeconds)
       }
 
       // 处理其他错误状态码
@@ -1243,6 +1301,9 @@ class OpenAIResponsesRelayService {
       }
 
       if (error.statusCode) {
+        if (error.statusCode === 429) {
+          return this._sendAllRateLimitedResponse(res)
+        }
         return res.status(error.statusCode).json({
           error: {
             message: error.message,
@@ -1325,6 +1386,16 @@ class OpenAIResponsesRelayService {
             .json(
               upstreamErrorHelper.sanitizeErrorForClient(unauthorizedResponse, { statusCode: 401 })
             )
+        }
+
+        if (status === 429) {
+          const retryAfterSeconds =
+            errorData?.error?.resets_in_seconds ||
+            upstreamErrorHelper.parseRetryAfter(error.response.headers)
+          return this._sendAllRateLimitedResponse(
+            res,
+            retryAfterSeconds
+          )
         }
 
         return res

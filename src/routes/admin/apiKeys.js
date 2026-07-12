@@ -1473,8 +1473,12 @@ router.post('/api-keys', authenticateAdmin, async (req, res) => {
       claudeConsoleAccountId,
       geminiAccountId,
       openaiAccountId,
+      preferredClaudeAccountId,
+      preferredGeminiAccountId,
+      preferredOpenaiAccountId,
       bedrockAccountId,
       droidAccountId,
+      preferredDroidAccountId,
       permissions,
       concurrencyLimit,
       rateLimitWindow,
@@ -1678,8 +1682,12 @@ router.post('/api-keys', authenticateAdmin, async (req, res) => {
       claudeConsoleAccountId,
       geminiAccountId,
       openaiAccountId,
+      preferredClaudeAccountId,
+      preferredGeminiAccountId,
+      preferredOpenaiAccountId,
       bedrockAccountId,
       droidAccountId,
+      preferredDroidAccountId,
       permissions,
       concurrencyLimit,
       rateLimitWindow,
@@ -1736,8 +1744,12 @@ router.post('/api-keys/batch', authenticateAdmin, async (req, res) => {
       claudeConsoleAccountId,
       geminiAccountId,
       openaiAccountId,
+      preferredClaudeAccountId,
+      preferredGeminiAccountId,
+      preferredOpenaiAccountId,
       bedrockAccountId,
       droidAccountId,
+      preferredDroidAccountId,
       permissions,
       concurrencyLimit,
       rateLimitWindow,
@@ -1801,8 +1813,12 @@ router.post('/api-keys/batch', authenticateAdmin, async (req, res) => {
           claudeConsoleAccountId,
           geminiAccountId,
           openaiAccountId,
+          preferredClaudeAccountId,
+          preferredGeminiAccountId,
+          preferredOpenaiAccountId,
           bedrockAccountId,
           droidAccountId,
+          preferredDroidAccountId,
           permissions,
           concurrencyLimit,
           rateLimitWindow,
@@ -1999,11 +2015,23 @@ router.put('/api-keys/batch', authenticateAdmin, async (req, res) => {
         if (updates.openaiAccountId !== undefined) {
           finalUpdates.openaiAccountId = updates.openaiAccountId
         }
+        if (updates.preferredClaudeAccountId !== undefined) {
+          finalUpdates.preferredClaudeAccountId = updates.preferredClaudeAccountId
+        }
+        if (updates.preferredGeminiAccountId !== undefined) {
+          finalUpdates.preferredGeminiAccountId = updates.preferredGeminiAccountId
+        }
+        if (updates.preferredOpenaiAccountId !== undefined) {
+          finalUpdates.preferredOpenaiAccountId = updates.preferredOpenaiAccountId
+        }
         if (updates.bedrockAccountId !== undefined) {
           finalUpdates.bedrockAccountId = updates.bedrockAccountId
         }
         if (updates.droidAccountId !== undefined) {
           finalUpdates.droidAccountId = updates.droidAccountId || ''
+        }
+        if (updates.preferredDroidAccountId !== undefined) {
+          finalUpdates.preferredDroidAccountId = updates.preferredDroidAccountId || ''
         }
 
         // 处理标签操作
@@ -2106,8 +2134,12 @@ router.put('/api-keys/:keyId', authenticateAdmin, async (req, res) => {
       claudeConsoleAccountId,
       geminiAccountId,
       openaiAccountId,
+      preferredClaudeAccountId,
+      preferredGeminiAccountId,
+      preferredOpenaiAccountId,
       bedrockAccountId,
       droidAccountId,
+      preferredDroidAccountId,
       permissions,
       enableModelRestriction,
       restrictedModels,
@@ -2200,6 +2232,18 @@ router.put('/api-keys/:keyId', authenticateAdmin, async (req, res) => {
       updates.openaiAccountId = openaiAccountId || ''
     }
 
+    if (preferredClaudeAccountId !== undefined) {
+      updates.preferredClaudeAccountId = preferredClaudeAccountId || ''
+    }
+
+    if (preferredGeminiAccountId !== undefined) {
+      updates.preferredGeminiAccountId = preferredGeminiAccountId || ''
+    }
+
+    if (preferredOpenaiAccountId !== undefined) {
+      updates.preferredOpenaiAccountId = preferredOpenaiAccountId || ''
+    }
+
     if (bedrockAccountId !== undefined) {
       // 空字符串表示解绑，null或空字符串都设置为空字符串
       updates.bedrockAccountId = bedrockAccountId || ''
@@ -2208,6 +2252,10 @@ router.put('/api-keys/:keyId', authenticateAdmin, async (req, res) => {
     if (droidAccountId !== undefined) {
       // 空字符串表示解绑，null或空字符串都设置为空字符串
       updates.droidAccountId = droidAccountId || ''
+    }
+
+    if (preferredDroidAccountId !== undefined) {
+      updates.preferredDroidAccountId = preferredDroidAccountId || ''
     }
 
     if (permissions !== undefined) {
