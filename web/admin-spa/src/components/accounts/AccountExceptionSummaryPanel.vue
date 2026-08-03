@@ -10,7 +10,7 @@
           <i class="fas fa-shield-halved mr-2 text-rose-500" /> 异常状态与统计
         </h4>
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-          近 {{ windowDays }} 天聚合，仅统计新版本写入的异常事件
+          {{ windowLabel }}聚合，仅统计新版本写入的异常事件
         </p>
       </div>
       <span
@@ -148,9 +148,7 @@
           <h5 class="text-sm font-semibold text-gray-700 dark:text-gray-200">
             <i class="fas fa-chart-simple mr-2 text-indigo-500" />每日异常趋势
           </h5>
-          <span class="text-xs text-gray-400 dark:text-gray-500"
-            >最近 {{ dailyBars.length }} 天</span
-          >
+          <span class="text-xs text-gray-400 dark:text-gray-500">{{ dailyWindowLabel }}</span>
         </div>
         <div class="flex h-28 items-end gap-1.5 overflow-x-auto pb-1">
           <div
@@ -297,6 +295,12 @@ const severityText = {
 const summary = computed(() => props.exceptionSummary || {})
 const hasSummary = computed(() => !!props.exceptionSummary)
 const windowDays = computed(() => summary.value.windowDays || 30)
+const windowLabel = computed(() => {
+  if (windowDays.value === 1) return '今天'
+  if (windowDays.value === 7) return '近一周'
+  if (windowDays.value === 30) return '近一月'
+  return `近${windowDays.value}天`
+})
 const currentStatus = computed(() => {
   if (!hasSummary.value) return unavailableCurrentStatus
   return summary.value.current || defaultCurrentStatus
@@ -321,10 +325,13 @@ const byStatusCode = computed(() => summary.value.byStatusCode || [])
 const hasStats = computed(() => Number(totals.value.total || 0) > 0)
 const topCategory = computed(() => byCategory.value[0] || null)
 const dailyBars = computed(() => (summary.value.daily || []).slice(-14))
+const dailyWindowLabel = computed(() =>
+  dailyBars.value.length === 1 ? '今天' : `最近 ${dailyBars.value.length} 天`
+)
 const maxDailyTotal = computed(() => Math.max(1, ...dailyBars.value.map((item) => item.total || 0)))
 const topContexts = computed(() => summary.value.topContexts || {})
 const emptyTitle = computed(() =>
-  hasSummary.value ? `近 ${windowDays.value} 天暂无异常聚合记录` : '异常统计暂不可用'
+  hasSummary.value ? `${windowLabel.value}暂无异常聚合记录` : '异常统计暂不可用'
 )
 const emptyNote = computed(() =>
   hasSummary.value
@@ -337,7 +344,7 @@ const metricCards = computed(() => [
     key: 'total',
     label: '异常总数',
     value: formatNumber(totals.value.total || 0),
-    subtitle: `近 ${windowDays.value} 天累计`,
+    subtitle: `${windowLabel.value}累计`,
     icon: 'fa-bolt',
     iconClass: 'text-rose-500'
   },

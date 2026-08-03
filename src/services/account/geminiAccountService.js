@@ -1875,6 +1875,7 @@ async function resetAccountStatus(accountId) {
     status: account.refreshToken ? 'active' : 'created',
     // 恢复可调度状态
     schedulable: 'true',
+    isActive: 'true',
     // 清除错误相关字段
     errorMessage: '',
     rateLimitedAt: '',

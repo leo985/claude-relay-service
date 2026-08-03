@@ -481,8 +481,11 @@ class GeminiApiAccountService {
       status: account.apiKey ? 'active' : 'created',
       // 恢复可调度状态
       schedulable: 'true',
+      isActive: 'true',
       // 清除错误相关字段
       errorMessage: '',
+      unauthorizedAt: '',
+      unauthorizedCount: '',
       rateLimitedAt: '',
       rateLimitStatus: '',
       rateLimitResetAt: '',

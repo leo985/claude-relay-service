@@ -210,6 +210,62 @@ describe('/v1/messages OpenAI-Responses fallback', () => {
     })
   })
 
+  it('provides group-aware account failover to the OpenAI-Responses relay', async () => {
+    const claudeError = new Error('No available Claude accounts')
+    claudeError.statusCode = 402
+    unifiedClaudeScheduler.selectAccountForApiKey.mockRejectedValue(claudeError)
+    unifiedOpenAIScheduler.selectAccountForApiKey
+      .mockResolvedValueOnce({
+        accountId: 'responses-1',
+        accountType: 'openai-responses'
+      })
+      .mockResolvedValueOnce({
+        accountId: 'responses-2',
+        accountType: 'openai-responses'
+      })
+    openaiResponsesAccountService.getAccount.mockImplementation(async (id) => ({
+      id,
+      name: id
+    }))
+    openaiResponsesRelayService.handleRequest.mockImplementation(
+      async (_req, res, _account, _apiKey, options) => {
+        const retryAccount = await options.selectRetryAccount({
+          failedAccountIds: ['responses-1']
+        })
+        expect(retryAccount).toMatchObject({ id: 'responses-2' })
+        res.status(200).json({ ok: true })
+      }
+    )
+
+    const req = createReq()
+    const res = createRes()
+    await handleMessagesRequest(req, res)
+
+    expect(openaiResponsesRelayService.handleRequest).toHaveBeenCalledWith(
+      req,
+      res,
+      expect.objectContaining({ id: 'responses-1' }),
+      req.apiKey,
+      expect.objectContaining({
+        maxNetworkRetries: 1,
+        selectRetryAccount: expect.any(Function)
+      })
+    )
+    expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenNthCalledWith(
+      2,
+      req.apiKey,
+      expect.any(String),
+      'claude-3-5-sonnet',
+      expect.objectContaining({
+        endpointKind: 'passthrough',
+        openaiResponsesOnly: true,
+        allowOpenAITokenForAnthropicImages: false,
+        excludeAccountIds: ['responses-1']
+      })
+    )
+    expect(res.status).toHaveBeenCalledWith(200)
+  })
+
   it('routes image Claude fallback to OpenAI token accounts when selected', async () => {
     const claudeError = new Error('No available Claude accounts')
     claudeError.statusCode = 402
@@ -335,7 +391,10 @@ describe('/v1/messages OpenAI-Responses fallback', () => {
         accountType: 'claude-official'
       })
       .mockRejectedValueOnce(new Error('No available accounts in group Test Group'))
-    claudeAccountService.getAccount.mockResolvedValueOnce({ id: 'claude-1', interceptWarmup: 'false' })
+    claudeAccountService.getAccount.mockResolvedValueOnce({
+      id: 'claude-1',
+      interceptWarmup: 'false'
+    })
     claudeRelayService.relayRequest.mockResolvedValueOnce({
       statusCode: 429,
       headers: { 'content-type': 'application/json' },
@@ -410,7 +469,8 @@ describe('/v1/messages/count_tokens OpenAI-Responses fallback', () => {
       req.apiKey,
       {
         customPath: '/v1/messages/count_tokens',
-        skipUsageRecord: true
+        skipUsageRecord: true,
+        sessionHash: expect.any(String)
       }
     )
     expect(res.status).toHaveBeenCalledWith(200)

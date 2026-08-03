@@ -95,7 +95,8 @@ router.post('/account-tests/batch/jobs', authenticateAdmin, (req, res) => {
       prompt: req.body?.prompt,
       maxTokens: req.body?.maxTokens,
       concurrency: req.body?.concurrency,
-      includeInactive: req.body?.includeInactive
+      includeInactive: req.body?.includeInactive,
+      autoRecover: req.body?.autoRecover === true
     })
 
     return res.status(job.reused ? 200 : 202).json({
@@ -122,7 +123,8 @@ router.post('/account-tests/batch', authenticateAdmin, async (req, res) => {
       prompt: req.body?.prompt,
       maxTokens: req.body?.maxTokens,
       concurrency: req.body?.concurrency,
-      includeInactive: req.body?.includeInactive
+      includeInactive: req.body?.includeInactive,
+      autoRecover: req.body?.autoRecover === true
     })
 
     return res.json({

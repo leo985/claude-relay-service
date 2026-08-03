@@ -7,9 +7,7 @@
         <i class="fas fa-coins mr-2 text-sm text-amber-500 md:mr-3 md:text-base" />
         服务费用统计
       </span>
-      <span class="text-xs font-normal text-gray-500 dark:text-gray-400">
-        计费 = 官方费用 × 全局倍率 × Key倍率
-      </span>
+      <span class="text-xs font-normal text-gray-500 dark:text-gray-400"> 按实际计费汇总 </span>
     </h3>
 
     <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -118,7 +116,8 @@ import { storeToRefs } from 'pinia'
 import { useApiStatsStore } from '@/stores/apistats'
 
 const apiStatsStore = useApiStatsStore()
-const { modelStats, serviceRates, keyServiceRates, multiKeyMode } = storeToRefs(apiStatsStore)
+const { modelStats, serviceRates, keyServiceRates, multiKeyMode, currentPeriodData } =
+  storeToRefs(apiStatsStore)
 
 // 服务标签映射
 const serviceLabels = {
@@ -179,8 +178,8 @@ const serviceStats = computed(() => {
       const globalRate = serviceRates.value.rates[service] || 1.0
       const keyRate = multiKeyMode.value ? 1.0 : (keyServiceRates.value?.[service] ?? 1.0)
       const modelRatedCost =
-        !model.isLegacy && model.costs?.rated !== undefined
-          ? model.costs.rated
+        !model.isLegacy && (model.costs?.billable !== undefined || model.costs?.rated !== undefined)
+          ? (model.costs.billable ?? model.costs.rated)
           : modelRealCost * globalRate * keyRate
       stats[service].ratedCost += modelRatedCost
       if (!stats[service].pricing && model.pricing) {
@@ -189,15 +188,33 @@ const serviceStats = computed(() => {
     }
   })
 
-  // 转换为数组
-  return Object.entries(stats)
-    .filter(
-      ([, data]) =>
-        data.inputTokens > 0 ||
-        data.outputTokens > 0 ||
-        data.cacheCreateTokens > 0 ||
-        data.realCost > 0
-    )
+  const activeStats = Object.entries(stats).filter(
+    ([, data]) =>
+      data.inputTokens > 0 ||
+      data.outputTokens > 0 ||
+      data.cacheCreateTokens > 0 ||
+      data.realCost > 0
+  )
+
+  // 模型级费用字段上线前的历史差额无法精确拆分，展示时按现有服务费用占比对账。
+  const exactBillingCost = Number(currentPeriodData.value?.cost)
+  const calculatedBillingCost = activeStats.reduce((sum, [, data]) => sum + data.ratedCost, 0)
+  if (
+    Number.isFinite(exactBillingCost) &&
+    exactBillingCost >= 0 &&
+    Math.abs(exactBillingCost - calculatedBillingCost) > 0.0000005
+  ) {
+    if (calculatedBillingCost > 0) {
+      const reconciliationRatio = exactBillingCost / calculatedBillingCost
+      activeStats.forEach(([, data]) => {
+        data.ratedCost *= reconciliationRatio
+      })
+    } else if (activeStats.length > 0) {
+      activeStats[0][1].ratedCost = exactBillingCost
+    }
+  }
+
+  return activeStats
     .map(([service, data]) => {
       const globalRate = serviceRates.value.rates[service] || 1.0
       const keyRate = multiKeyMode.value ? 1.0 : (keyServiceRates.value?.[service] ?? 1.0)
@@ -211,7 +228,8 @@ const serviceStats = computed(() => {
         outputTokens: data.outputTokens,
         cacheCreateTokens: data.cacheCreateTokens,
         cacheReadTokens: data.cacheReadTokens,
-        officialCost: formatCost(data.realCost),
+        // 两个公开金额保持一致，避免通过差额反推出 Key 的隐藏倍率。
+        officialCost: formatCost(data.ratedCost),
         ccCost: formatCost(data.ratedCost),
         pricing: p
           ? {

@@ -2,6 +2,15 @@ const Redis = require('ioredis')
 const config = require('../../config/config')
 const logger = require('../utils/logger')
 
+const INCREMENT_BILLABLE_MODEL_COST_SCRIPT = `
+local current = redis.call('HGET', KEYS[1], 'billableCostMicro')
+if not current then
+  local rated = redis.call('HGET', KEYS[1], 'ratedCostMicro') or '0'
+  redis.call('HSET', KEYS[1], 'billableCostMicro', rated)
+end
+return redis.call('HINCRBY', KEYS[1], 'billableCostMicro', ARGV[1])
+`
+
 // 时区辅助函数
 // 注意：这个函数的目的是获取某个时间点在目标时区的"本地"表示
 // 例如：UTC时间 2025-07-30 01:00:00 在 UTC+8 时区表示为 2025-07-30 09:00:00
@@ -1077,7 +1086,8 @@ class RedisClient {
     ephemeral1hTokens = 0, // 新增：1小时缓存 tokens
     isLongContextRequest = false, // 新增：是否为 1M 上下文请求（超过200k）
     realCost = 0, // 真实费用（官方API费用）
-    ratedCost = 0 // 计费费用（应用倍率后）
+    ratedCost = 0, // 公开倍率费用（全局倍率 × Key 倍率）
+    billableCost = ratedCost // 应计费用（包含 API Key 隐藏倍率）
   ) {
     const key = `usage:${keyId}`
     const now = new Date()
@@ -1212,6 +1222,14 @@ class RedisClient {
     if (realCost > 0) {
       pipeline.hincrby(keyModelDaily, 'realCostMicro', Math.round(realCost * 1000000))
     }
+    if (billableCost > 0) {
+      pipeline.eval(
+        INCREMENT_BILLABLE_MODEL_COST_SCRIPT,
+        1,
+        keyModelDaily,
+        Math.round(billableCost * 1000000)
+      )
+    }
     if (ratedCost > 0) {
       pipeline.hincrby(keyModelDaily, 'ratedCostMicro', Math.round(ratedCost * 1000000))
     }
@@ -1230,6 +1248,14 @@ class RedisClient {
     if (realCost > 0) {
       pipeline.hincrby(keyModelMonthly, 'realCostMicro', Math.round(realCost * 1000000))
     }
+    if (billableCost > 0) {
+      pipeline.eval(
+        INCREMENT_BILLABLE_MODEL_COST_SCRIPT,
+        1,
+        keyModelMonthly,
+        Math.round(billableCost * 1000000)
+      )
+    }
     if (ratedCost > 0) {
       pipeline.hincrby(keyModelMonthly, 'ratedCostMicro', Math.round(ratedCost * 1000000))
     }
@@ -1247,6 +1273,14 @@ class RedisClient {
     // 费用统计
     if (realCost > 0) {
       pipeline.hincrby(keyModelAlltime, 'realCostMicro', Math.round(realCost * 1000000))
+    }
+    if (billableCost > 0) {
+      pipeline.eval(
+        INCREMENT_BILLABLE_MODEL_COST_SCRIPT,
+        1,
+        keyModelAlltime,
+        Math.round(billableCost * 1000000)
+      )
     }
     if (ratedCost > 0) {
       pipeline.hincrby(keyModelAlltime, 'ratedCostMicro', Math.round(ratedCost * 1000000))
@@ -1288,6 +1322,14 @@ class RedisClient {
     // 费用统计
     if (realCost > 0) {
       pipeline.hincrby(keyModelHourly, 'realCostMicro', Math.round(realCost * 1000000))
+    }
+    if (billableCost > 0) {
+      pipeline.eval(
+        INCREMENT_BILLABLE_MODEL_COST_SCRIPT,
+        1,
+        keyModelHourly,
+        Math.round(billableCost * 1000000)
+      )
     }
     if (ratedCost > 0) {
       pipeline.hincrby(keyModelHourly, 'ratedCostMicro', Math.round(ratedCost * 1000000))

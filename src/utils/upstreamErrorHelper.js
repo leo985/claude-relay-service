@@ -99,12 +99,17 @@ const getAccountTempUnavailablePolicy = async (accountId, accountType) => {
   }
 }
 
-const resolveAccountTtlOverride = ({ policy, statusCode, errorType }) => {
+const resolveAccountTtlOverride = ({
+  policy,
+  statusCode,
+  errorType,
+  ignoreDisableTempUnavailable = false
+}) => {
   if (!policy) {
     return { skip: false, ttlOverrideSeconds: null, reason: '' }
   }
 
-  if (policy.disableTempUnavailable) {
+  if (policy.disableTempUnavailable && !ignoreDisableTempUnavailable) {
     return {
       skip: true,
       ttlOverrideSeconds: null,
@@ -428,7 +433,8 @@ const markTempUnavailable = async (
   accountType,
   statusCode,
   customTtl = null,
-  context = null
+  context = null,
+  options = {}
 ) => {
   try {
     const errorType = classifyError(statusCode)
@@ -440,7 +446,8 @@ const markTempUnavailable = async (
     const policyDecision = resolveAccountTtlOverride({
       policy,
       statusCode,
-      errorType
+      errorType,
+      ignoreDisableTempUnavailable: options?.ignoreDisableTempUnavailable === true
     })
 
     const key = `${TEMP_UNAVAILABLE_PREFIX}:${accountType}:${accountId}`

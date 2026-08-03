@@ -13,6 +13,7 @@ const redis = require('../../models/redis')
 const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const CostCalculator = require('../../utils/costCalculator')
+const { resolveUsageRecordCosts, scaleCostBreakdown } = require('../../utils/usageRecordCost')
 const pricingService = require('../../services/pricingService')
 const {
   CATEGORY_PRIORITY,
@@ -480,7 +481,7 @@ router.get('/accounts/:accountId/usage-stats', authenticateAdmin, async (req, re
   }
 })
 
-// 获取账号近30天使用历史
+// 获取账号指定时间范围的使用历史
 router.get('/accounts/:accountId/usage-history', authenticateAdmin, async (req, res) => {
   try {
     const { accountId } = req.params
@@ -3120,8 +3121,7 @@ router.get('/api-keys/:keyId/usage-records', authenticateAdmin, async (req, res)
     for (const record of filteredRecords) {
       const usage = toUsageObject(record)
       const costData = CostCalculator.calculateCost(usage, record.model || 'unknown')
-      const computedCost =
-        typeof record.cost === 'number' ? record.cost : costData?.costs?.total || 0
+      const recordCosts = resolveUsageRecordCosts(record, costData?.costs?.total || 0)
       const totalTokens =
         record.totalTokens ||
         usage.input_tokens +
@@ -3135,7 +3135,7 @@ router.get('/api-keys/:keyId/usage-records', authenticateAdmin, async (req, res)
       summary.cacheCreateTokens += usage.cache_creation_input_tokens
       summary.cacheReadTokens += usage.cache_read_input_tokens
       summary.totalTokens += totalTokens
-      summary.totalCost += computedCost
+      summary.totalCost += recordCosts.billableCost
 
       if (record.model) {
         modelSet.add(record.model)
@@ -3177,10 +3177,7 @@ router.get('/api-keys/:keyId/usage-records', authenticateAdmin, async (req, res)
     for (const record of pageRecords) {
       const usage = toUsageObject(record)
       const costData = CostCalculator.calculateCost(usage, record.model || 'unknown')
-      const computedCost =
-        typeof record.cost === 'number' ? record.cost : costData?.costs?.total || 0
-      const realCost =
-        typeof record.realCost === 'number' ? record.realCost : costData?.costs?.total || 0
+      const recordCosts = resolveUsageRecordCosts(record, costData?.costs?.total || 0)
       const totalTokens =
         record.totalTokens ||
         usage.input_tokens +
@@ -3190,6 +3187,21 @@ router.get('/api-keys/:keyId/usage-records', authenticateAdmin, async (req, res)
 
       const accountInfo = await resolveAccountInfo(record.accountId, record.accountType)
       const resolvedAccountType = accountInfo?.type || record.accountType || 'unknown'
+      const fallbackBreakdown = {
+        input: costData?.costs?.input || 0,
+        output: costData?.costs?.output || 0,
+        cacheCreate: costData?.costs?.cacheCreate || costData?.costs?.cacheWrite || 0,
+        cacheRead: costData?.costs?.cacheRead || 0,
+        total: costData?.costs?.total || recordCosts.realCost
+      }
+      const realCostBreakdown =
+        record.realCostBreakdown || record.costBreakdown || fallbackBreakdown
+      const ratedCostBreakdown =
+        record.ratedCostBreakdown ||
+        scaleCostBreakdown(realCostBreakdown, recordCosts.realCost, recordCosts.ratedCost)
+      const billableCostBreakdown =
+        record.billableCostBreakdown ||
+        scaleCostBreakdown(realCostBreakdown, recordCosts.realCost, recordCosts.billableCost)
 
       enrichedRecords.push({
         timestamp: record.timestamp,
@@ -3207,18 +3219,18 @@ router.get('/api-keys/:keyId/usage-records', authenticateAdmin, async (req, res)
         ephemeral1hTokens: record.ephemeral1hTokens || 0,
         totalTokens,
         isLongContextRequest: record.isLongContext || record.isLongContextRequest || false,
-        cost: Number(computedCost.toFixed(6)),
-        costFormatted: CostCalculator.formatCost(computedCost),
-        realCost: Number(realCost.toFixed(6)),
-        realCostFormatted: CostCalculator.formatCost(realCost),
-        costBreakdown: record.realCostBreakdown ||
-          record.costBreakdown || {
-            input: costData?.costs?.input || 0,
-            output: costData?.costs?.output || 0,
-            cacheCreate: costData?.costs?.cacheWrite || 0,
-            cacheRead: costData?.costs?.cacheRead || 0,
-            total: costData?.costs?.total || computedCost
-          },
+        cost: Number(recordCosts.billableCost.toFixed(6)),
+        costFormatted: CostCalculator.formatCost(recordCosts.billableCost),
+        realCost: Number(recordCosts.realCost.toFixed(6)),
+        realCostFormatted: CostCalculator.formatCost(recordCosts.realCost),
+        ratedCost: Number(recordCosts.ratedCost.toFixed(6)),
+        ratedCostFormatted: CostCalculator.formatCost(recordCosts.ratedCost),
+        billableCost: Number(recordCosts.billableCost.toFixed(6)),
+        billableCostFormatted: CostCalculator.formatCost(recordCosts.billableCost),
+        costBreakdown: realCostBreakdown,
+        realCostBreakdown,
+        ratedCostBreakdown,
+        billableCostBreakdown,
         responseTime: record.responseTime || null
       })
     }

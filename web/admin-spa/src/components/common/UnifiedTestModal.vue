@@ -689,7 +689,7 @@ const credentialTypeBadgeClass = computed(() => {
 
 // ========== 通用计算属性 ==========
 const modalTitle = computed(() =>
-  props.mode === 'account' ? '账户连通性测试' : 'API Key 端点测试'
+  props.mode === 'account' ? '账户轻量连通测试' : 'API Key 端点测试'
 )
 const modalSubtitle = computed(() => {
   if (props.mode === 'account') return props.account?.name || '未知账户'
@@ -708,11 +708,11 @@ const statusDescription = computed(() => {
   const apiName = props.mode === 'account' ? platformLabel.value : apikeyServiceConfig.value.name
   if (s === 'idle')
     return props.mode === 'account'
-      ? '点击下方按钮开始测试账户连通性'
+      ? '点击下方按钮发起轻量上游探测'
       : '点击下方按钮开始测试 API Key 连通性'
   if (s === 'testing') return '正在发送测试请求并等待响应'
   if (s === 'success')
-    return props.mode === 'account' ? `账户可以正常访问 ${apiName}` : 'API Key 可以正常访问服务'
+    return props.mode === 'account' ? `${apiName} 轻量连通探测通过` : 'API Key 可以正常访问服务'
   if (s === 'error') return state.errorMessage.value || `无法连接到 ${apiName}`
   return ''
 })

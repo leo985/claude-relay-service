@@ -587,7 +587,7 @@ async function handleMessages(req, res) {
               0,
               model,
               accountId,
-              'gemini',
+              accountType || 'gemini',
               null,
               createRequestDetailMeta(req, {
                 requestBody: req.body,
@@ -718,7 +718,7 @@ async function handleMessages(req, res) {
                 0,
                 model,
                 accountId,
-                'gemini',
+                accountType || 'gemini',
                 null,
                 createRequestDetailMeta(req, {
                   requestBody: req.body,
@@ -1741,7 +1741,7 @@ async function handleGenerateContent(req, res) {
           0,
           model,
           account.id,
-          'gemini',
+          accountType || 'gemini',
           null,
           createRequestDetailMeta(req, {
             requestBody: req.body,
@@ -2097,7 +2097,7 @@ async function handleStreamGenerateContent(req, res) {
             0,
             model,
             account.id,
-            'gemini',
+            accountType || 'gemini',
             null,
             createRequestDetailMeta(req, {
               requestBody: req.body,
@@ -2457,7 +2457,7 @@ async function handleStandardGenerateContent(req, res) {
           0,
           model,
           accountId,
-          'gemini',
+          accountType || 'gemini',
           null,
           createRequestDetailMeta(req, {
             requestBody: req.body,
@@ -2905,7 +2905,7 @@ async function handleStandardStreamGenerateContent(req, res) {
             0,
             model,
             accountId,
-            'gemini',
+            accountType || 'gemini',
             null,
             createRequestDetailMeta(req, {
               requestBody: req.body,

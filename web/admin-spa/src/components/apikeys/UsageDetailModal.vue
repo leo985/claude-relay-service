@@ -98,6 +98,107 @@
             </div>
           </div>
 
+          <!-- 最近 30 天统计按需加载，不影响 API Keys 列表首屏 -->
+          <div class="mb-6">
+            <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <h4 class="flex items-center text-sm font-semibold text-gray-700 dark:text-gray-300">
+                <i class="fas fa-calendar-alt mr-2 text-cyan-600" />
+                最近 30 天调用情况
+              </h4>
+              <div
+                v-if="monthlyUsage"
+                class="inline-flex rounded-md border border-gray-200 bg-gray-50 p-0.5 dark:border-gray-600 dark:bg-gray-800"
+              >
+                <button
+                  v-for="option in monthlyMetricOptions"
+                  :key="option.value"
+                  class="rounded px-3 py-1.5 text-xs font-medium transition-colors"
+                  :class="
+                    monthlyMetric === option.value
+                      ? 'bg-white text-gray-900 shadow-sm dark:bg-gray-700 dark:text-gray-100'
+                      : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'
+                  "
+                  type="button"
+                  @click="monthlyMetric = option.value"
+                >
+                  {{ option.label }}
+                </button>
+              </div>
+            </div>
+
+            <div
+              v-if="monthlyLoading"
+              class="flex h-48 items-center justify-center rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-500 dark:border-gray-700 dark:bg-gray-800/60 dark:text-gray-400"
+            >
+              <i class="fas fa-spinner fa-spin mr-2" />正在加载月度统计
+            </div>
+            <div
+              v-else-if="monthlyError"
+              class="flex min-h-28 flex-col items-center justify-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-5 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300"
+            >
+              <span>{{ monthlyError }}</span>
+              <button
+                class="btn btn-secondary px-3 py-1.5 text-xs"
+                type="button"
+                @click="loadMonthlyUsage"
+              >
+                重新加载
+              </button>
+            </div>
+            <template v-else-if="monthlyUsage">
+              <div class="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+                <div
+                  class="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-800/60"
+                >
+                  <div class="text-xs text-gray-500 dark:text-gray-400">30 天请求</div>
+                  <div class="mt-1 text-lg font-semibold text-gray-900 dark:text-gray-100">
+                    {{ formatNumber(monthlySummary.totalRequests) }}
+                  </div>
+                </div>
+                <div
+                  class="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-800/60"
+                >
+                  <div class="text-xs text-gray-500 dark:text-gray-400">30 天 Token</div>
+                  <div class="mt-1 text-lg font-semibold text-gray-900 dark:text-gray-100">
+                    {{ formatTokenCount(monthlySummary.totalTokens) }}
+                  </div>
+                </div>
+                <div
+                  class="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-800/60"
+                >
+                  <div class="text-xs text-gray-500 dark:text-gray-400">30 天费用</div>
+                  <div class="mt-1 text-lg font-semibold text-gray-900 dark:text-gray-100">
+                    {{ formatCost(monthlySummary.totalCost) }}
+                  </div>
+                </div>
+                <div
+                  class="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-800/60"
+                >
+                  <div class="text-xs text-gray-500 dark:text-gray-400">有调用天数</div>
+                  <div class="mt-1 text-lg font-semibold text-gray-900 dark:text-gray-100">
+                    {{ monthlySummary.activeDays || 0 }} / 30
+                  </div>
+                </div>
+              </div>
+
+              <div
+                v-if="monthlySummary.activeDays > 0"
+                class="h-64 rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-800/40"
+              >
+                <canvas ref="monthlyChartCanvas" />
+              </div>
+              <div
+                v-else
+                class="flex h-32 items-center justify-center rounded-lg border border-dashed border-gray-300 text-sm text-gray-500 dark:border-gray-600 dark:text-gray-400"
+              >
+                最近 30 天暂无调用记录
+              </div>
+              <div class="mt-2 text-right text-xs text-gray-400 dark:text-gray-500">
+                数据截至 {{ monthlyUsage.endDate }}，统计结果最多缓存 30 秒
+              </div>
+            </template>
+          </div>
+
           <!-- Token详细分布 -->
           <div class="mb-6">
             <h4
@@ -321,11 +422,12 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import LimitProgressBar from './LimitProgressBar.vue'
 import WindowCountdown from './WindowCountdown.vue'
 
 import { formatNumber } from '@/utils/tools'
+import { getApiKeyMonthlyUsageApi } from '@/utils/http_apis'
 
 const props = defineProps({
   show: {
@@ -339,6 +441,21 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close', 'open-timeline'])
+
+const monthlyUsage = ref(null)
+const monthlyLoading = ref(false)
+const monthlyError = ref('')
+const monthlyMetric = ref('requests')
+const monthlyChartCanvas = ref(null)
+const monthlyMetricOptions = [
+  { value: 'requests', label: '请求数' },
+  { value: 'tokens', label: 'Token' },
+  { value: 'cost', label: '费用' }
+]
+let chartInstance = null
+let ChartConstructor = null
+let loadSequence = 0
+let chartRenderSequence = 0
 
 // 计算属性
 const totalRequests = computed(() => props.apiKey.usage?.total?.requests || 0)
@@ -356,6 +473,7 @@ const cacheCreateTokens = computed(() => props.apiKey.usage?.total?.cacheCreateT
 const cacheReadTokens = computed(() => props.apiKey.usage?.total?.cacheReadTokens || 0)
 const rpm = computed(() => props.apiKey.usage?.averages?.rpm || 0)
 const tpm = computed(() => props.apiKey.usage?.averages?.tpm || 0)
+const monthlySummary = computed(() => monthlyUsage.value?.summary || {})
 
 const enableModelRestriction = computed(
   () =>
@@ -421,6 +539,7 @@ const opusUsagePercentage = computed(() => {
 
 // 格式化Token数量（使用K/M单位）
 const formatTokenCount = (count) => {
+  count = Number(count) || 0
   if (count >= 1000000) {
     return (count / 1000000).toFixed(1) + 'M'
   } else if (count >= 1000) {
@@ -429,11 +548,151 @@ const formatTokenCount = (count) => {
   return count.toString()
 }
 
+const formatCost = (value) => `$${(Number(value) || 0).toFixed(4)}`
+
+const cleanupChart = () => {
+  if (chartInstance) {
+    chartInstance.destroy()
+    chartInstance = null
+  }
+}
+
+const renderMonthlyChart = async () => {
+  const sequence = ++chartRenderSequence
+  await nextTick()
+  cleanupChart()
+
+  if (
+    !props.show ||
+    !monthlyChartCanvas.value ||
+    !monthlyUsage.value?.history?.length ||
+    monthlySummary.value.activeDays <= 0
+  ) {
+    return
+  }
+
+  if (!ChartConstructor) {
+    const chartModule = await import('chart.js/auto')
+    ChartConstructor = chartModule.default
+  }
+
+  if (sequence !== chartRenderSequence || !props.show || !monthlyChartCanvas.value) return
+
+  const option = monthlyMetricOptions.find((item) => item.value === monthlyMetric.value)
+  const isDark = document.documentElement.classList.contains('dark')
+  const colorMap = {
+    requests: { line: '#0284c7', fill: 'rgba(2, 132, 199, 0.12)' },
+    tokens: { line: '#059669', fill: 'rgba(5, 150, 105, 0.12)' },
+    cost: { line: '#d97706', fill: 'rgba(217, 119, 6, 0.12)' }
+  }
+  const colors = colorMap[monthlyMetric.value]
+
+  chartInstance = new ChartConstructor(monthlyChartCanvas.value, {
+    type: 'line',
+    data: {
+      labels: monthlyUsage.value.history.map((item) => item.label),
+      datasets: [
+        {
+          label: option.label,
+          data: monthlyUsage.value.history.map((item) => item[monthlyMetric.value] || 0),
+          borderColor: colors.line,
+          backgroundColor: colors.fill,
+          borderWidth: 2,
+          pointRadius: 1.5,
+          pointHoverRadius: 4,
+          tension: 0.3,
+          fill: true
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (context) =>
+              monthlyMetric.value === 'cost'
+                ? `${option.label}: ${formatCost(context.parsed.y)}`
+                : `${option.label}: ${formatNumber(context.parsed.y)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: isDark ? '#9ca3af' : '#6b7280', maxTicksLimit: 10 },
+          grid: { display: false }
+        },
+        y: {
+          beginAtZero: true,
+          ticks: {
+            color: isDark ? '#9ca3af' : '#6b7280',
+            callback: (value) =>
+              monthlyMetric.value === 'cost' ? formatCost(value) : formatTokenCount(value)
+          },
+          grid: { color: isDark ? 'rgba(75, 85, 99, 0.35)' : 'rgba(209, 213, 219, 0.6)' }
+        }
+      }
+    }
+  })
+}
+
+const loadMonthlyUsage = async () => {
+  const keyId = props.apiKey?.id
+  if (!keyId || !props.show) return
+
+  const sequence = ++loadSequence
+  monthlyLoading.value = true
+  monthlyError.value = ''
+  monthlyUsage.value = null
+  cleanupChart()
+
+  const response = await getApiKeyMonthlyUsageApi(keyId)
+  if (sequence !== loadSequence || !props.show || props.apiKey?.id !== keyId) return
+
+  if (response.success) {
+    monthlyUsage.value = response.data || null
+    monthlyLoading.value = false
+    await renderMonthlyChart()
+    return
+  }
+
+  monthlyLoading.value = false
+  monthlyError.value = response.message || response.error || '加载最近 30 天调用情况失败'
+}
+
 const close = () => {
+  loadSequence += 1
+  chartRenderSequence += 1
+  cleanupChart()
   emit('close')
 }
 
 const openTimeline = () => {
   emit('open-timeline', props.apiKey?.id)
 }
+
+watch(
+  () => [props.show, props.apiKey?.id],
+  ([show, keyId], previous = []) => {
+    const [wasShown, previousKeyId] = previous
+    if (show && keyId && (!wasShown || keyId !== previousKeyId)) {
+      loadMonthlyUsage()
+    } else if (!show) {
+      loadSequence += 1
+      chartRenderSequence += 1
+      monthlyLoading.value = false
+      cleanupChart()
+    }
+  },
+  { immediate: true }
+)
+
+watch(monthlyMetric, () => {
+  if (props.show && monthlyUsage.value) renderMonthlyChart()
+})
+
+onUnmounted(cleanupChart)
 </script>

@@ -103,10 +103,11 @@ const apiKeyService = require('../src/services/apiKeyService')
 const openaiAccountService = require('../src/services/account/openaiAccountService')
 const openaiResponsesAccountService = require('../src/services/account/openaiResponsesAccountService')
 const openaiResponsesRelayService = require('../src/services/relay/openaiResponsesRelayService')
+const logger = require('../src/utils/logger')
 const openaiRoutes = require('../src/routes/openaiRoutes')
 
-function createHash(value) {
-  return crypto.createHash('sha256').update(value).digest('hex')
+function createHash(value, apiKeyId = 'key_1') {
+  return crypto.createHash('sha256').update(`${apiKeyId}:${value}`).digest('hex')
 }
 
 const RESPONSES_REQUEST_FEATURES = {
@@ -220,6 +221,63 @@ describe('openai responses payload toggles', () => {
       'gpt-5',
       RESPONSES_REQUEST_FEATURES
     )
+  })
+
+  test('uses the identity captured before unified Chat Completions conversion', async () => {
+    const req = createReq({
+      body: {
+        model: 'gpt-5',
+        prompt_cache_key: 'converted-cache-key'
+      },
+      fromUnifiedEndpoint: true,
+      apiKeyOverrides: { openaiAccountId: 'group:openai-group' }
+    })
+    req._relaySessionId = 'original-conversation'
+
+    await openaiRoutes.handleResponses(req, createRes())
+
+    const canonicalHash = createHash('original-conversation')
+    expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenCalledWith(
+      req.apiKey,
+      canonicalHash,
+      'gpt-5',
+      expect.any(Object)
+    )
+    expect(openaiResponsesRelayService.handleRequest).toHaveBeenCalledWith(
+      req,
+      expect.any(Object),
+      expect.any(Object),
+      req.apiKey,
+      expect.objectContaining({ sessionHash: canonicalHash })
+    )
+  })
+
+  test('logs a safe warning when a group-bound request has no explicit session identity', async () => {
+    const req = createReq({
+      body: { model: 'gpt-5' },
+      apiKeyOverrides: {
+        name: 'group-key',
+        openaiAccountId: 'group:openai-group'
+      }
+    })
+
+    await openaiRoutes.handleResponses(req, createRes())
+
+    expect(unifiedOpenAIScheduler.selectAccountForApiKey).toHaveBeenCalledWith(
+      req.apiKey,
+      null,
+      'gpt-5',
+      expect.any(Object)
+    )
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Sticky session disabled: missing session identity',
+      expect.objectContaining({
+        apiKeyId: 'key_1',
+        apiKeyName: 'group-key',
+        path: '/v1/responses'
+      })
+    )
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('messages')
   })
 
   test('applies Codex adaptation only when adaptation toggle is on', async () => {

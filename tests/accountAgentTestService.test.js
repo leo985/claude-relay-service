@@ -17,14 +17,18 @@ jest.mock('../src/utils/proxyHelper', () => ({
 }))
 jest.mock('../src/utils/upstreamErrorHelper', () => ({
   parseRetryAfter: jest.fn(),
-  recordErrorHistory: jest.fn()
+  recordErrorHistory: jest.fn(),
+  getAllTempUnavailable: jest.fn()
 }))
 jest.mock('../src/models/redis', () => ({
   incrementAccountUsage: jest.fn(),
   getClientSafe: jest.fn()
 }))
 
-jest.mock('../src/services/account/claudeAccountService', () => ({ getAccount: jest.fn() }))
+jest.mock('../src/services/account/claudeAccountService', () => ({
+  getAccount: jest.fn(),
+  resetAccountStatus: jest.fn()
+}))
 jest.mock('../src/services/account/claudeConsoleAccountService', () => ({
   getAccount: jest.fn(),
   getMappedModel: jest.fn((mapping, model) => {
@@ -33,44 +37,53 @@ jest.mock('../src/services/account/claudeConsoleAccountService', () => ({
     )
     return match?.[1] || model
   }),
-  markAccountRateLimited: jest.fn()
+  markAccountRateLimited: jest.fn(),
+  resetAccountStatus: jest.fn()
 }))
 jest.mock('../src/services/account/bedrockAccountService', () => ({
   getAccount: jest.fn(),
-  markAccountRateLimited: jest.fn()
+  markAccountRateLimited: jest.fn(),
+  resetAccountStatus: jest.fn()
 }))
 jest.mock('../src/services/account/geminiAccountService', () => ({
   getAccount: jest.fn(),
-  setAccountRateLimited: jest.fn()
+  setAccountRateLimited: jest.fn(),
+  resetAccountStatus: jest.fn()
 }))
 jest.mock('../src/services/account/geminiApiAccountService', () => ({
   getAccount: jest.fn(),
-  setAccountRateLimited: jest.fn()
+  setAccountRateLimited: jest.fn(),
+  resetAccountStatus: jest.fn()
 }))
 jest.mock('../src/services/account/openaiAccountService', () => ({
   getAccount: jest.fn(),
   isTokenExpired: jest.fn(),
   refreshAccountToken: jest.fn(),
-  decrypt: jest.fn((value) => value)
+  decrypt: jest.fn((value) => value),
+  resetAccountStatus: jest.fn()
 }))
 jest.mock('../src/services/account/openaiResponsesAccountService', () => ({
-  getAccount: jest.fn()
+  getAccount: jest.fn(),
+  resetAccountStatus: jest.fn()
 }))
 jest.mock('../src/services/account/azureOpenaiAccountService', () => ({
   getAccount: jest.fn(),
   getDecryptedApiKey: jest.fn(),
-  markAccountRateLimited: jest.fn()
+  markAccountRateLimited: jest.fn(),
+  resetAccountStatus: jest.fn()
 }))
 jest.mock('../src/services/account/droidAccountService', () => ({
   getAccount: jest.fn(),
   getDecryptedApiKeyEntries: jest.fn(),
   getValidAccessToken: jest.fn(),
-  markAccountRateLimited: jest.fn()
+  markAccountRateLimited: jest.fn(),
+  resetAccountStatus: jest.fn()
 }))
 jest.mock('../src/services/account/ccrAccountService', () => ({
   getAccount: jest.fn(),
   getDecryptedCredentials: jest.fn(),
-  markAccountRateLimited: jest.fn()
+  markAccountRateLimited: jest.fn(),
+  resetAccountStatus: jest.fn()
 }))
 
 jest.mock('../src/services/relay/claudeRelayService', () => ({
@@ -97,6 +110,7 @@ const redis = require('../src/models/redis')
 const axios = require('axios')
 const claudeAccountService = require('../src/services/account/claudeAccountService')
 const openaiAccountService = require('../src/services/account/openaiAccountService')
+const openaiResponsesAccountService = require('../src/services/account/openaiResponsesAccountService')
 const azureOpenaiAccountService = require('../src/services/account/azureOpenaiAccountService')
 const droidAccountService = require('../src/services/account/droidAccountService')
 const ccrAccountService = require('../src/services/account/ccrAccountService')
@@ -132,6 +146,8 @@ describe('accountAgentTestService', () => {
     redis.getClientSafe.mockReturnValue(redisClient)
     upstreamErrorHelper.parseRetryAfter.mockReturnValue(null)
     upstreamErrorHelper.recordErrorHistory.mockResolvedValue(undefined)
+    upstreamErrorHelper.getAllTempUnavailable.mockResolvedValue({})
+    openaiResponsesAccountService.resetAccountStatus.mockResolvedValue({ success: true })
     unifiedOpenAIScheduler.markAccountRateLimited.mockResolvedValue({ success: true })
     modelService.getAllModels.mockResolvedValue([
       { id: 'claude-sonnet-4-5-20250929', owned_by: 'anthropic' },
@@ -259,6 +275,27 @@ describe('accountAgentTestService', () => {
         statusCode: 429,
         rateLimitHandled: true
       })
+    )
+  })
+
+  it('passes the selected prompt and token limit to the Claude OAuth tester', async () => {
+    claudeRelayService.testAccountConnectionSync.mockResolvedValue({
+      success: true,
+      message: 'OK',
+      model: 'claude-test'
+    })
+
+    await accountAgentTestService._testClaude({
+      accountId: 'claude-options',
+      model: 'claude-test',
+      prompt: 'RECOVERY_OK',
+      maxTokens: 256
+    })
+
+    expect(claudeRelayService.testAccountConnectionSync).toHaveBeenCalledWith(
+      'claude-options',
+      'claude-test',
+      { prompt: 'RECOVERY_OK', maxTokens: 256 }
     )
   })
 
@@ -574,6 +611,272 @@ describe('accountAgentTestService', () => {
       })
     )
     expect(runTest).not.toHaveBeenCalled()
+  })
+
+  it('tests an automatically rate-limited account even when scheduling is disabled', async () => {
+    jest.spyOn(accountAgentTestService, '_loadAccount').mockResolvedValue({
+      id: 'responses-limited',
+      name: 'Limited Responses',
+      providerEndpoint: 'responses',
+      schedulable: 'false',
+      status: 'rateLimited',
+      rateLimitStatus: 'limited',
+      rateLimitedAt: '2026-07-14T00:00:00.000Z'
+    })
+    jest.spyOn(accountAgentTestService, '_runTest').mockResolvedValue({
+      statusCode: 200,
+      data: { output_text: 'OK' }
+    })
+
+    const result = await accountAgentTestService.testAccountsBatch({
+      accounts: [{ platform: 'openai-responses', accountId: 'responses-limited' }]
+    })
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        accountCount: 1,
+        testCount: 1,
+        successCount: 1,
+        recoveryEligibleCount: 1,
+        recoveredCount: 0
+      })
+    )
+    expect(result.results[0].recovery).toEqual(
+      expect.objectContaining({
+        eligible: true,
+        attempted: false,
+        reason: 'auto_recover_disabled'
+      })
+    )
+  })
+
+  it('restores an auto-protected account after all primary and confirmation tests pass', async () => {
+    let resetCompleted = false
+    jest.spyOn(accountAgentTestService, '_loadAccount').mockImplementation(async () =>
+      resetCompleted
+        ? {
+            id: 'responses-recover',
+            name: 'Recover Responses',
+            providerEndpoint: 'responses',
+            schedulable: 'true',
+            isActive: 'true',
+            status: 'active',
+            rateLimitStatus: ''
+          }
+        : {
+            id: 'responses-recover',
+            name: 'Recover Responses',
+            providerEndpoint: 'responses',
+            schedulable: 'false',
+            isActive: 'true',
+            status: 'rateLimited',
+            rateLimitStatus: 'limited',
+            rateLimitedAt: '2026-07-14T00:00:00.000Z'
+          }
+    )
+    jest.spyOn(accountAgentTestService, '_runTest').mockResolvedValue({
+      statusCode: 200,
+      data: { output_text: 'OK' }
+    })
+    openaiResponsesAccountService.resetAccountStatus.mockImplementation(async () => {
+      resetCompleted = true
+      return { success: true }
+    })
+
+    const result = await accountAgentTestService.testAccountsBatch({
+      accounts: [{ platform: 'openai-responses', accountId: 'responses-recover' }],
+      autoRecover: true,
+      recoveryConfirmationDelayMs: 0
+    })
+
+    expect(openaiResponsesAccountService.resetAccountStatus).toHaveBeenCalledWith(
+      'responses-recover'
+    )
+    expect(accountAgentTestService._runTest).toHaveBeenCalledTimes(2)
+    expect(result).toEqual(
+      expect.objectContaining({
+        recoveryEligibleCount: 1,
+        recoveryAttemptedCount: 1,
+        recoveredCount: 1,
+        recoveryFailedCount: 0,
+        recoverySkippedCount: 0
+      })
+    )
+    expect(result.results[0].recovery).toEqual(
+      expect.objectContaining({
+        attempted: true,
+        recovered: true,
+        reason: 'recovered',
+        confirmationTests: [expect.objectContaining({ success: true, confirmation: true })]
+      })
+    )
+  })
+
+  it('keeps protection active when the enhanced recovery confirmation is rate limited', async () => {
+    jest.spyOn(accountAgentTestService, '_loadAccount').mockResolvedValue({
+      id: 'responses-confirmation-limited',
+      name: 'Confirmation Limited',
+      providerEndpoint: 'responses',
+      schedulable: 'false',
+      status: 'rateLimited',
+      rateLimitStatus: 'limited',
+      rateLimitedAt: '2026-07-14T00:00:00.000Z'
+    })
+    jest
+      .spyOn(accountAgentTestService, '_runTest')
+      .mockResolvedValueOnce({ statusCode: 200, data: { output_text: 'OK' } })
+      .mockResolvedValueOnce({
+        statusCode: 429,
+        data: { error: { message: 'still rate limited' } },
+        rateLimitHandled: true
+      })
+
+    const result = await accountAgentTestService.testAccountsBatch({
+      accounts: [{ platform: 'openai-responses', accountId: 'responses-confirmation-limited' }],
+      autoRecover: true,
+      recoveryConfirmationDelayMs: 0
+    })
+
+    expect(openaiResponsesAccountService.resetAccountStatus).not.toHaveBeenCalled()
+    expect(result).toEqual(
+      expect.objectContaining({
+        successCount: 1,
+        failedCount: 0,
+        recoveryAttemptedCount: 1,
+        recoveredCount: 0,
+        recoveryFailedCount: 1
+      })
+    )
+    expect(result.results[0].recovery).toEqual(
+      expect.objectContaining({
+        attempted: true,
+        recovered: false,
+        reason: 'confirmation_failed',
+        confirmationTests: [expect.objectContaining({ success: false, statusCode: 429 })]
+      })
+    )
+  })
+
+  it('does not recover an account when the batch covers only part of its supported agents', async () => {
+    jest.spyOn(accountAgentTestService, '_loadAccount').mockResolvedValue({
+      id: 'responses-partial',
+      name: 'Partial Responses',
+      providerEndpoint: 'passthrough',
+      schedulable: 'false',
+      status: 'rateLimited',
+      rateLimitStatus: 'limited',
+      rateLimitedAt: '2026-07-14T00:00:00.000Z'
+    })
+    jest.spyOn(accountAgentTestService, '_runTest').mockResolvedValue({
+      statusCode: 200,
+      data: { output_text: 'OK' }
+    })
+
+    const result = await accountAgentTestService.testAccountsBatch({
+      accounts: [{ platform: 'openai-responses', accountId: 'responses-partial' }],
+      agents: ['codex'],
+      autoRecover: true,
+      recoveryConfirmationDelayMs: 0
+    })
+
+    expect(accountAgentTestService._runTest).toHaveBeenCalledTimes(1)
+    expect(openaiResponsesAccountService.resetAccountStatus).not.toHaveBeenCalled()
+    expect(result).toEqual(
+      expect.objectContaining({
+        recoveryAttemptedCount: 0,
+        recoveredCount: 0,
+        recoverySkippedCount: 1
+      })
+    )
+    expect(result.results[0].recovery.reason).toBe('partial_agent_coverage')
+  })
+
+  it('recognizes a temp-unavailable cooldown as recoverable instead of a manual stop', async () => {
+    let resetCompleted = false
+    upstreamErrorHelper.getAllTempUnavailable.mockResolvedValue({
+      'openai-responses:responses-temp': {
+        accountId: 'responses-temp',
+        accountType: 'openai-responses',
+        statusCode: 503,
+        remainingSeconds: 300
+      }
+    })
+    jest.spyOn(accountAgentTestService, '_loadAccount').mockImplementation(async () => ({
+      id: 'responses-temp',
+      name: 'Temp Responses',
+      providerEndpoint: 'responses',
+      schedulable: resetCompleted ? 'true' : 'false',
+      isActive: 'true',
+      status: 'active'
+    }))
+    jest.spyOn(accountAgentTestService, '_runTest').mockResolvedValue({
+      statusCode: 200,
+      data: { output_text: 'OK' }
+    })
+    openaiResponsesAccountService.resetAccountStatus.mockImplementation(async () => {
+      resetCompleted = true
+      return { success: true }
+    })
+
+    const result = await accountAgentTestService.testAccountsBatch({
+      accounts: [{ platform: 'openai-responses', accountId: 'responses-temp' }],
+      autoRecover: true,
+      recoveryConfirmationDelayMs: 0
+    })
+
+    expect(result.recoveredCount).toBe(1)
+    expect(result.results[0].recovery.protectionReasons).toContain(
+      'temp_unavailable:openai-responses'
+    )
+  })
+
+  it('reports recovery work in background-job progress until the account is restored', async () => {
+    let resetCompleted = false
+    jest.spyOn(accountAgentTestService, '_loadAccount').mockImplementation(async () => ({
+      id: 'responses-recovery-job',
+      name: 'Recovery Job',
+      providerEndpoint: 'responses',
+      schedulable: resetCompleted ? 'true' : 'false',
+      isActive: 'true',
+      status: resetCompleted ? 'active' : 'rateLimited',
+      rateLimitStatus: resetCompleted ? '' : 'limited',
+      rateLimitedAt: resetCompleted ? '' : '2026-07-14T00:00:00.000Z'
+    }))
+    jest.spyOn(accountAgentTestService, '_runTest').mockResolvedValue({
+      statusCode: 200,
+      data: { output_text: 'OK' }
+    })
+    openaiResponsesAccountService.resetAccountStatus.mockImplementation(async () => {
+      resetCompleted = true
+      return { success: true }
+    })
+
+    const started = accountAgentTestService.startBatchTestJob({
+      accounts: [{ platform: 'openai-responses', accountId: 'responses-recovery-job' }],
+      autoRecover: true,
+      recoveryConfirmationDelayMs: 0,
+      concurrency: 1
+    })
+
+    let completed
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve))
+      completed = accountAgentTestService.getBatchTestJob(started.id)
+      if (completed.status === 'completed') break
+    }
+
+    expect(completed).toEqual(
+      expect.objectContaining({
+        status: 'completed',
+        phase: 'completed',
+        recoveryEligibleCount: 1,
+        recoveryTotalCount: 1,
+        recoveryAttemptedCount: 1,
+        recoveryCompletedCount: 1,
+        recoveredCount: 1,
+        progressPercent: 100
+      })
+    )
   })
 
   it('runs a batch test as a queryable background job with real progress', async () => {

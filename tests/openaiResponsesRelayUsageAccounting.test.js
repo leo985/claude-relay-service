@@ -40,7 +40,7 @@ jest.mock('../src/services/apiKeyService', () => ({
 
 jest.mock('../src/services/scheduler/unifiedOpenAIScheduler', () => ({
   markAccountRateLimited: jest.fn(),
-  _deleteSessionMapping: jest.fn()
+  _deleteSessionMapping: jest.fn().mockResolvedValue()
 }))
 
 jest.mock('../src/utils/upstreamErrorHelper', () => ({
@@ -75,6 +75,7 @@ const { extractOpenAICacheReadTokens } = require('../src/utils/requestDetailHelp
 const { updateRateLimitCounters } = require('../src/utils/rateLimitHelper')
 const logger = require('../src/utils/logger')
 const upstreamErrorHelper = require('../src/utils/upstreamErrorHelper')
+const unifiedOpenAIScheduler = require('../src/services/scheduler/unifiedOpenAIScheduler')
 const axios = require('axios')
 
 function createReq(overrides = {}) {
@@ -847,6 +848,610 @@ describe('openaiResponsesRelayService upstream 429 handling', () => {
     expect(res.status).not.toHaveBeenCalledWith(429)
     expect(res.headers['Retry-After']).toBe('45')
     expect(res.payload.error.code).toBe('upstream_accounts_rate_limited')
+  })
+})
+
+describe('openaiResponsesRelayService canonical sticky cleanup', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    axios.mockReset()
+    upstreamErrorHelper.markTempUnavailable.mockResolvedValue()
+    apiKeyService.recordUsage.mockResolvedValue({ realCost: 0, ratedCost: 0 })
+    openaiResponsesAccountService.updateAccount.mockResolvedValue()
+    openaiResponsesAccountService.updateAccountUsage.mockResolvedValue()
+    openaiResponsesAccountService.updateUsageQuota.mockResolvedValue()
+    updateRateLimitCounters.mockResolvedValue({ totalTokens: 0, ratedCost: 0 })
+    openaiResponsesAccountService.getAccount.mockImplementation(async (id) => ({
+      id,
+      name: id,
+      apiKey: `sk-${id}`,
+      baseApi: 'https://api.example.com',
+      providerEndpoint: 'responses'
+    }))
+  })
+
+  test('uses the canonical hash when a 429 invalidates the sticky mapping', async () => {
+    axios.mockResolvedValueOnce({
+      status: 429,
+      data: { error: { message: 'rate limited', resets_in_seconds: 30 } },
+      headers: {}
+    })
+    const req = createReq({
+      body: { model: 'gpt-4.1', prompt_cache_key: 'conflicting-body-session', stream: false }
+    })
+    const res = createRes()
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      { sessionHash: 'canonical-session-hash' }
+    )
+
+    expect(unifiedOpenAIScheduler.markAccountRateLimited).toHaveBeenCalledWith(
+      'acct-1',
+      'openai-responses',
+      'canonical-session-hash',
+      30
+    )
+  })
+
+  test('deletes the canonical mapping after a 401 response', async () => {
+    axios.mockResolvedValueOnce({
+      status: 401,
+      data: { error: { message: 'unauthorized' } },
+      headers: {}
+    })
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      { sessionHash: 'canonical-session-hash' }
+    )
+
+    expect(unifiedOpenAIScheduler._deleteSessionMapping).toHaveBeenCalledWith(
+      'canonical-session-hash'
+    )
+  })
+
+  test('keeps the canonical mapping identity through network failover', async () => {
+    axios
+      .mockRejectedValueOnce(Object.assign(new Error('socket timed out'), { code: 'ETIMEDOUT' }))
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { id: 'resp-1', model: 'gpt-4.1' },
+        headers: {}
+      })
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+    const selectRetryAccount = jest.fn().mockResolvedValue({ id: 'acct-2', name: 'Backup' })
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      {
+        sessionHash: 'canonical-session-hash',
+        maxNetworkRetries: 1,
+        selectRetryAccount
+      }
+    )
+
+    expect(unifiedOpenAIScheduler._deleteSessionMapping).toHaveBeenCalledWith(
+      'canonical-session-hash'
+    )
+    expect(selectRetryAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ failedAccountIds: ['acct-1'] })
+    )
+    expect(axios).toHaveBeenCalledTimes(2)
+    expect(res.status).toHaveBeenCalledWith(200)
+  })
+})
+
+describe('openaiResponsesRelayService upstream 403 failover', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    axios.mockReset()
+    upstreamErrorHelper.markTempUnavailable.mockResolvedValue()
+    apiKeyService.recordUsage.mockResolvedValue({ realCost: 0, ratedCost: 0 })
+    openaiResponsesAccountService.updateAccount.mockResolvedValue()
+    openaiResponsesAccountService.updateAccountUsage.mockResolvedValue()
+    openaiResponsesAccountService.updateUsageQuota.mockResolvedValue()
+    updateRateLimitCounters.mockResolvedValue({ totalTokens: 0, ratedCost: 0 })
+    openaiResponsesAccountService.getAccount.mockImplementation(async (id) => ({
+      id,
+      name: id,
+      apiKey: `sk-${id}`,
+      baseApi: 'https://api.example.com',
+      providerEndpoint: 'responses'
+    }))
+  })
+
+  test('cools the denied account and switches to another compatible account', async () => {
+    axios
+      .mockResolvedValueOnce({
+        status: 403,
+        data: { error: { message: 'authorization failed' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { id: 'resp-1', model: 'gpt-4.1' },
+        headers: {}
+      })
+
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+    const selectRetryAccount = jest.fn().mockResolvedValue({
+      id: 'acct-2',
+      name: 'Backup'
+    })
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      { selectRetryAccount }
+    )
+
+    expect(axios).toHaveBeenCalledTimes(2)
+    expect(upstreamErrorHelper.markTempUnavailable).toHaveBeenCalledWith(
+      'acct-1',
+      'openai-responses',
+      403
+    )
+    expect(selectRetryAccount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'permission_error',
+        statusCode: 403,
+        failedAccountIds: ['acct-1']
+      })
+    )
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.status).not.toHaveBeenCalledWith(403)
+  })
+
+  test('returns the last 403 after every compatible account is denied', async () => {
+    axios
+      .mockResolvedValueOnce({
+        status: 403,
+        data: { error: { message: 'primary denied' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 403,
+        data: { error: { message: 'backup denied' } },
+        headers: {}
+      })
+
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+    const selectRetryAccount = jest
+      .fn()
+      .mockResolvedValueOnce({ id: 'acct-2', name: 'Backup' })
+      .mockResolvedValueOnce(null)
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      { selectRetryAccount }
+    )
+
+    expect(axios).toHaveBeenCalledTimes(2)
+    expect(upstreamErrorHelper.markTempUnavailable).toHaveBeenCalledTimes(2)
+    expect(selectRetryAccount).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        failedAccountIds: ['acct-1', 'acct-2'],
+        statusCode: 403
+      })
+    )
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(res.payload).toEqual({ error: { message: 'backup denied' } })
+  })
+
+  test('keeps failover but skips cooldown when auto protection is disabled', async () => {
+    axios
+      .mockResolvedValueOnce({
+        status: 403,
+        data: { error: { message: 'authorization failed' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { id: 'resp-1', model: 'gpt-4.1' },
+        headers: {}
+      })
+
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+    const selectRetryAccount = jest.fn().mockResolvedValue({
+      id: 'acct-2',
+      name: 'Backup'
+    })
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary', disableAutoProtection: true },
+      { id: 'key-1' },
+      { selectRetryAccount }
+    )
+
+    expect(upstreamErrorHelper.markTempUnavailable).not.toHaveBeenCalled()
+    expect(selectRetryAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ failedAccountIds: ['acct-1'], statusCode: 403 })
+    )
+    expect(res.status).toHaveBeenCalledWith(200)
+  })
+})
+
+describe('openaiResponsesRelayService upstream 5xx failover', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    axios.mockReset()
+    upstreamErrorHelper.markTempUnavailable.mockResolvedValue()
+    apiKeyService.recordUsage.mockResolvedValue({ realCost: 0, ratedCost: 0 })
+    openaiResponsesAccountService.updateAccount.mockResolvedValue()
+    openaiResponsesAccountService.updateAccountUsage.mockResolvedValue()
+    openaiResponsesAccountService.updateUsageQuota.mockResolvedValue()
+    updateRateLimitCounters.mockResolvedValue({ totalTokens: 0, ratedCost: 0 })
+    openaiResponsesAccountService.getAccount.mockImplementation(async (id) => ({
+      id,
+      name: id,
+      apiKey: `sk-${id}`,
+      baseApi: 'https://api.example.com',
+      providerEndpoint: 'responses'
+    }))
+  })
+
+  test('retries each account once before switching after retryable 5xx statuses', async () => {
+    for (const status of [500, 502, 503, 504, 529]) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        axios.mockResolvedValueOnce({
+          status,
+          statusText: 'Upstream failure',
+          data: { error: { message: `failed-${status}` } },
+          headers: {}
+        })
+      }
+    }
+    axios.mockResolvedValueOnce({
+      status: 200,
+      data: { id: 'resp-1', model: 'gpt-4.1' },
+      headers: {}
+    })
+
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+    const selectRetryAccount = jest
+      .fn()
+      .mockResolvedValueOnce({ id: 'acct-2', name: 'Backup 2' })
+      .mockResolvedValueOnce({ id: 'acct-3', name: 'Backup 3' })
+      .mockResolvedValueOnce({ id: 'acct-4', name: 'Backup 4' })
+      .mockResolvedValueOnce({ id: 'acct-5', name: 'Backup 5' })
+      .mockResolvedValueOnce({ id: 'acct-6', name: 'Backup 6' })
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      { selectRetryAccount, serverErrorRetryDelayMs: 0 }
+    )
+
+    expect(axios).toHaveBeenCalledTimes(11)
+    expect(selectRetryAccount).toHaveBeenCalledTimes(5)
+    expect(selectRetryAccount).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        reason: 'server_error',
+        statusCode: 500,
+        failedAccountIds: ['acct-1']
+      })
+    )
+    expect(selectRetryAccount).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        statusCode: 529,
+        failedAccountIds: ['acct-1', 'acct-2', 'acct-3', 'acct-4', 'acct-5']
+      })
+    )
+    expect(upstreamErrorHelper.markTempUnavailable).toHaveBeenCalledTimes(5)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.status).not.toHaveBeenCalledWith(503)
+  })
+
+  test('keeps the account schedulable when its same-account retry succeeds', async () => {
+    axios
+      .mockResolvedValueOnce({
+        status: 503,
+        data: { error: { message: 'temporary outage' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { id: 'resp-1', model: 'gpt-4.1' },
+        headers: {}
+      })
+
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+    const selectRetryAccount = jest.fn()
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      { selectRetryAccount, serverErrorRetryDelayMs: 0 }
+    )
+
+    expect(axios).toHaveBeenCalledTimes(2)
+    expect(selectRetryAccount).not.toHaveBeenCalled()
+    expect(upstreamErrorHelper.markTempUnavailable).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(200)
+  })
+
+  test('enforces a ten-minute cooldown after the same account returns 529 twice', async () => {
+    axios
+      .mockResolvedValueOnce({
+        status: 529,
+        data: { error: { message: 'overloaded' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 529,
+        data: { error: { message: 'still overloaded' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { id: 'resp-1', model: 'gpt-4.1' },
+        headers: {}
+      })
+
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+    const selectRetryAccount = jest.fn().mockResolvedValue({
+      id: 'acct-2',
+      name: 'Backup'
+    })
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary', disableTempUnavailable: true },
+      { id: 'key-1' },
+      { selectRetryAccount, serverErrorRetryDelayMs: 0 }
+    )
+
+    expect(axios).toHaveBeenCalledTimes(3)
+    expect(upstreamErrorHelper.markTempUnavailable).toHaveBeenCalledWith(
+      'acct-1',
+      'openai-responses',
+      529,
+      600,
+      null,
+      { ignoreDisableTempUnavailable: true }
+    )
+    expect(selectRetryAccount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failedAccountIds: ['acct-1'],
+        statusCode: 529
+      })
+    )
+    expect(res.status).toHaveBeenCalledWith(200)
+  })
+
+  test('does not cool down a 529 account when auto protection is disabled', async () => {
+    axios
+      .mockResolvedValueOnce({
+        status: 529,
+        data: { error: { message: 'overloaded' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 529,
+        data: { error: { message: 'still overloaded' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: { id: 'resp-1', model: 'gpt-4.1' },
+        headers: {}
+      })
+
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+    const selectRetryAccount = jest.fn().mockResolvedValue({
+      id: 'acct-2',
+      name: 'Backup'
+    })
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary', disableAutoProtection: true },
+      { id: 'key-1' },
+      { selectRetryAccount, serverErrorRetryDelayMs: 0 }
+    )
+
+    expect(upstreamErrorHelper.markTempUnavailable).not.toHaveBeenCalled()
+    expect(selectRetryAccount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failedAccountIds: ['acct-1'],
+        statusCode: 529
+      })
+    )
+    expect(res.status).toHaveBeenCalledWith(200)
+  })
+
+  test('returns a unified 503 after every compatible account fails', async () => {
+    axios
+      .mockResolvedValueOnce({
+        status: 500,
+        data: { error: { message: 'internal error' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 500,
+        data: { error: { message: 'internal error again' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 529,
+        data: { error: { message: 'overloaded' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 529,
+        data: { error: { message: 'still overloaded' } },
+        headers: {}
+      })
+
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+    const selectRetryAccount = jest
+      .fn()
+      .mockResolvedValueOnce({ id: 'acct-2', name: 'Backup' })
+      .mockResolvedValueOnce(null)
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      { selectRetryAccount, serverErrorRetryDelayMs: 0 }
+    )
+
+    expect(axios).toHaveBeenCalledTimes(4)
+    expect(upstreamErrorHelper.markTempUnavailable).toHaveBeenCalledTimes(2)
+    expect(res.status).toHaveBeenCalledWith(503)
+    expect(res.payload.error.code).toBe('all_upstream_accounts_unavailable')
+  })
+
+  test('returns upstream unavailable when failover ends with 429 after an earlier 5xx', async () => {
+    axios
+      .mockResolvedValueOnce({
+        status: 500,
+        data: { error: { message: 'internal error' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 500,
+        data: { error: { message: 'internal error again' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 429,
+        data: { error: { message: 'rate limited', resets_in_seconds: 30 } },
+        headers: {}
+      })
+
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+    const selectRetryAccount = jest
+      .fn()
+      .mockResolvedValueOnce({ id: 'acct-2', name: 'Backup' })
+      .mockResolvedValueOnce(null)
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      { selectRetryAccount, serverErrorRetryDelayMs: 0 }
+    )
+
+    expect(axios).toHaveBeenCalledTimes(3)
+    expect(res.status).toHaveBeenCalledWith(503)
+    expect(res.payload.error.code).toBe('all_upstream_accounts_unavailable')
+    expect(res.payload.error.code).not.toBe('upstream_accounts_rate_limited')
+  })
+
+  test('does not retry non-retryable HTTP errors', async () => {
+    axios.mockResolvedValueOnce({
+      status: 422,
+      data: { error: { message: 'invalid request' } },
+      headers: {}
+    })
+
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+    const selectRetryAccount = jest.fn()
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      { selectRetryAccount }
+    )
+
+    expect(selectRetryAccount).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(422)
+  })
+
+  test('keeps the upstream 5xx for a directly bound account without failover selection', async () => {
+    axios
+      .mockResolvedValueOnce({
+        status: 502,
+        data: { error: { message: 'bad gateway' } },
+        headers: {}
+      })
+      .mockResolvedValueOnce({
+        status: 502,
+        data: { error: { message: 'bad gateway again' } },
+        headers: {}
+      })
+
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      { serverErrorRetryDelayMs: 0 }
+    )
+
+    expect(axios).toHaveBeenCalledTimes(2)
+    expect(upstreamErrorHelper.markTempUnavailable).toHaveBeenCalledTimes(1)
+    expect(res.status).toHaveBeenCalledWith(502)
+    expect(res.payload).toEqual({ error: { message: 'bad gateway again' } })
+  })
+
+  test('stops before sending upstream when the shared failover deadline is exhausted', async () => {
+    const req = createReq({ body: { model: 'gpt-4.1', stream: false } })
+    const res = createRes()
+    const selectRetryAccount = jest.fn()
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      { id: 'acct-1', name: 'Primary' },
+      { id: 'key-1' },
+      {
+        selectRetryAccount,
+        failoverDeadlineAt: Date.now() - 1,
+        serverErrorRetryDelayMs: 0
+      }
+    )
+
+    expect(axios).not.toHaveBeenCalled()
+    expect(selectRetryAccount).not.toHaveBeenCalled()
+    expect(upstreamErrorHelper.markTempUnavailable).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(504)
+    expect(res.payload.error.code).toBe('upstream_timeout')
   })
 })
 

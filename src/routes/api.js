@@ -33,6 +33,7 @@ const {
   handleAnthropicCountTokensToGemini
 } = require('../services/anthropicGeminiBridgeService')
 const { getRequestFeaturesFromBody } = require('../utils/openaiCompatible')
+const { buildSessionHash } = require('../utils/sessionIdentity')
 const router = express.Router()
 
 function buildAllUpstreamRateLimitedPayload() {
@@ -222,16 +223,18 @@ async function fallbackToOpenAIResponses({ req, res, sessionHash, requestedModel
   }
 
   const label = context ? ` ${context}` : ''
+  const openAISessionHash = buildSessionHash(req.apiKey?.id, sessionHash)
   try {
     logger.info(
       `🔀${label} Attempting OpenAI-Responses fallback for /v1/messages via ${req.apiKey.openaiAccountId}`
     )
 
+    const requestFeatures = getAnthropicPassthroughFeatures(req.body)
     const selection = await unifiedOpenAIScheduler.selectAccountForApiKey(
       req.apiKey,
-      sessionHash,
+      openAISessionHash,
       requestedModel,
-      getAnthropicPassthroughFeatures(req.body)
+      requestFeatures
     )
 
     if (!selection?.accountId || !['openai-responses', 'openai'].includes(selection.accountType)) {
@@ -264,7 +267,45 @@ async function fallbackToOpenAIResponses({ req, res, sessionHash, requestedModel
     logger.info(
       `🔀${label} Falling back to OpenAI-Responses account: ${responsesAccount.name} (${selection.accountId}) for /v1/messages`
     )
-    await openaiResponsesRelayService.handleRequest(req, res, responsesAccount, req.apiKey)
+    const canRetryWithAlternateAccount = req.apiKey.openaiAccountId.startsWith('group:')
+    const relayOptions = {
+      sessionHash: openAISessionHash,
+      ...(canRetryWithAlternateAccount
+        ? {
+            maxNetworkRetries: 1,
+            selectRetryAccount: async ({ failedAccountIds }) => {
+              const retrySelection = await unifiedOpenAIScheduler.selectAccountForApiKey(
+                req.apiKey,
+                openAISessionHash,
+                requestedModel,
+                {
+                  ...requestFeatures,
+                  allowOpenAITokenForAnthropicImages: false,
+                  excludeAccountIds: failedAccountIds
+                }
+              )
+
+              if (
+                retrySelection?.accountType !== 'openai-responses' ||
+                !retrySelection.accountId ||
+                failedAccountIds.includes(retrySelection.accountId)
+              ) {
+                return null
+              }
+
+              return openaiResponsesAccountService.getAccount(retrySelection.accountId)
+            }
+          }
+        : {})
+    }
+
+    await openaiResponsesRelayService.handleRequest(
+      req,
+      res,
+      responsesAccount,
+      req.apiKey,
+      relayOptions
+    )
     return true
   } catch (fallbackError) {
     logger.error(`❌${label} Fallback to OpenAI-Responses failed: ${fallbackError.message}`)
@@ -317,9 +358,10 @@ async function fallbackCountTokensToOpenAIResponses({ req, res, sessionHash, req
     `🔀 [count_tokens] Attempting OpenAI-Responses fallback via ${req.apiKey.openaiAccountId}`
   )
 
+  const openAISessionHash = buildSessionHash(req.apiKey?.id, sessionHash)
   const selection = await unifiedOpenAIScheduler.selectAccountForApiKey(
     req.apiKey,
-    sessionHash,
+    openAISessionHash,
     requestedModel,
     getAnthropicPassthroughFeatures(req.body)
   )
@@ -355,7 +397,8 @@ async function fallbackCountTokensToOpenAIResponses({ req, res, sessionHash, req
 
   await openaiResponsesRelayService.handleRequest(req, res, responsesAccount, req.apiKey, {
     customPath: '/v1/messages/count_tokens',
-    skipUsageRecord: true
+    skipUsageRecord: true,
+    sessionHash: openAISessionHash
   })
   return true
 }

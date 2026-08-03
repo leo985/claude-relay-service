@@ -5,9 +5,11 @@ const redis = require('../models/redis')
 const logger = require('../utils/logger')
 const serviceRatesService = require('./serviceRatesService')
 const requestDetailService = require('./requestDetailService')
+const apiKeyBillingMultiplierService = require('./apiKeyBillingMultiplierService')
 const { isClaudeFamilyModel } = require('../utils/modelHelper')
 const { finalizeRequestDetailMeta } = require('../utils/requestDetailHelper')
 const { normalizeUsage, toAnthropicUsageObject } = require('../utils/usageNormalizer')
+const { createUsageRecordCostFields } = require('../utils/usageRecordCost')
 const requestBodyRuleService = require('./requestBodyRuleService')
 
 const ACCOUNT_TYPE_CONFIG = {
@@ -1734,6 +1736,7 @@ class ApiKeyService {
         const service = serviceRatesService.getService(accountType, model)
         ratedCost = await this.calculateRatedCost(keyId, service, realCost)
       }
+      const billableCost = await this.calculateBillableCost(keyId, ratedCost)
 
       // 记录API Key级别的使用统计（包含费用）
       await redis.incrementTokenUsage(
@@ -1748,18 +1751,19 @@ class ApiKeyService {
         0, // ephemeral1hTokens - 暂时为0，后续处理
         isLongContextRequest,
         realCost,
-        ratedCost
+        ratedCost,
+        billableCost
       )
 
       // 记录费用统计到每日/每月汇总
       if (realCost > 0) {
-        await redis.incrementDailyCost(keyId, ratedCost, realCost)
+        await redis.incrementDailyCost(keyId, billableCost, realCost)
         logger.database(
-          `💰 Recorded cost for ${keyId}: rated=$${ratedCost.toFixed(6)}, real=$${realCost.toFixed(6)}, model: ${model}`
+          `💰 Recorded cost for ${keyId}: billable=$${billableCost.toFixed(6)}, rated=$${ratedCost.toFixed(6)}, real=$${realCost.toFixed(6)}, model: ${model}`
         )
 
         // 记录 Opus 周费用（如果适用）
-        await this.recordOpusCost(keyId, ratedCost, realCost, model, accountType)
+        await this.recordOpusCost(keyId, billableCost, realCost, model, accountType)
       } else {
         logger.debug(`💰 No cost recorded for ${keyId} - zero cost for model: ${model}`)
       }
@@ -1821,10 +1825,12 @@ class ApiKeyService {
         cacheCreateTokens,
         cacheReadTokens,
         totalTokens,
-        cost: Number(ratedCost.toFixed(6)),
-        realCost: Number(realCost.toFixed(6)),
-        costBreakdown: costInfo?.costs || undefined,
-        realCostBreakdown: costInfo?.costs || undefined,
+        ...createUsageRecordCostFields({
+          realCost,
+          ratedCost,
+          billableCost,
+          costBreakdown: costInfo?.costs || undefined
+        }),
         isLongContext: isLongContextRequest
       }
 
@@ -1844,10 +1850,10 @@ class ApiKeyService {
 
       logger.database(`📊 Recorded usage: ${keyId} - ${logParts.join(', ')}`)
 
-      return { realCost, ratedCost }
+      return { realCost, ratedCost, billableCost }
     } catch (error) {
       logger.error('❌ Failed to record usage:', error)
-      return { realCost: 0, ratedCost: 0 }
+      return { realCost: 0, ratedCost: 0, billableCost: 0 }
     }
   }
 
@@ -1899,6 +1905,7 @@ class ApiKeyService {
         const service = serviceRatesService.getService(accountType, model)
         ratedCost = await this.calculateRatedCost(keyId, service, realCost)
       }
+      const billableCost = await this.calculateBillableCost(keyId, ratedCost)
 
       await redis.incrementTokenUsage(
         keyId,
@@ -1912,13 +1919,14 @@ class ApiKeyService {
         0,
         false,
         realCost,
-        ratedCost
+        ratedCost,
+        billableCost
       )
 
       if (realCost > 0) {
-        await redis.incrementDailyCost(keyId, ratedCost, realCost)
+        await redis.incrementDailyCost(keyId, billableCost, realCost)
         logger.database(
-          `💰 Recorded image cost for ${keyId}: rated=$${ratedCost.toFixed(6)}, real=$${realCost.toFixed(6)}, model: ${model}`
+          `💰 Recorded image cost for ${keyId}: billable=$${billableCost.toFixed(6)}, rated=$${ratedCost.toFixed(6)}, real=$${realCost.toFixed(6)}, model: ${model}`
         )
       } else {
         logger.debug(`💰 No image cost recorded for ${keyId} - model: ${model}`)
@@ -1980,10 +1988,12 @@ class ApiKeyService {
           cacheReadTextTokens,
           cacheReadImageTokens
         },
-        cost: Number(ratedCost.toFixed(6)),
-        realCost: Number(realCost.toFixed(6)),
-        costBreakdown: costInfo?.costs || undefined,
-        realCostBreakdown: costInfo?.costs || undefined,
+        ...createUsageRecordCostFields({
+          realCost,
+          ratedCost,
+          billableCost,
+          costBreakdown: costInfo?.costs || undefined
+        }),
         pricingSource: costInfo?.debug?.pricingSource || null,
         usedFallbackPricing: false,
         isLongContext: false
@@ -1998,17 +2008,17 @@ class ApiKeyService {
         `📊 Recorded image usage: ${keyId} - Model: ${model}, Input: ${aggregateInputTokens}, OutputImage: ${aggregateOutputTokens}, CacheRead: ${aggregateCacheReadTokens}, Total: ${totalTokens}`
       )
 
-      return { realCost, ratedCost, costInfo, totalTokens }
+      return { realCost, ratedCost, billableCost, costInfo, totalTokens }
     } catch (error) {
       logger.error('❌ Failed to record image usage:', error)
-      return { realCost: 0, ratedCost: 0, costInfo: null, totalTokens: 0 }
+      return { realCost: 0, ratedCost: 0, billableCost: 0, costInfo: null, totalTokens: 0 }
     }
   }
 
   // 📊 记录 Opus 模型费用（仅限 claude 和 claude-console 账户，支持自定义重置周期）
-  // ratedCost: 倍率后的成本（用于限额校验）
+  // billableCost: 包含 API Key 隐藏倍率的成本（用于限额校验）
   // realCost: 真实成本（用于对账），如果不传则等于 ratedCost
-  async recordOpusCost(keyId, ratedCost, realCost, model, accountType) {
+  async recordOpusCost(keyId, billableCost, realCost, model, accountType) {
     try {
       // 判断是否为 Claude 系列模型（包含 Bedrock 格式等）
       if (!isClaudeFamilyModel(model)) {
@@ -2028,9 +2038,9 @@ class ApiKeyService {
       const resetHour = parseInt(keyData?.weeklyResetHour || 0)
 
       // 记录 Opus 周费用（倍率成本和真实成本）
-      await redis.incrementWeeklyOpusCost(keyId, ratedCost, realCost, resetDay, resetHour)
+      await redis.incrementWeeklyOpusCost(keyId, billableCost, realCost, resetDay, resetHour)
       logger.database(
-        `💰 Recorded Opus weekly cost for ${keyId}: rated=$${ratedCost.toFixed(6)}, real=$${realCost.toFixed(6)}, model: ${model}`
+        `💰 Recorded Opus weekly cost for ${keyId}: billable=$${billableCost.toFixed(6)}, real=$${realCost.toFixed(6)}, model: ${model}`
       )
     } catch (error) {
       logger.error('❌ Failed to record Opus weekly cost:', error)
@@ -2118,6 +2128,7 @@ class ApiKeyService {
         const service = serviceRatesService.getService(accountType, model)
         ratedCostWithDetails = await this.calculateRatedCost(keyId, service, realCostWithDetails)
       }
+      const billableCostWithDetails = await this.calculateBillableCost(keyId, ratedCostWithDetails)
 
       // 记录API Key级别的使用统计（包含费用）
       await redis.incrementTokenUsage(
@@ -2132,21 +2143,22 @@ class ApiKeyService {
         ephemeral1hTokens,
         costInfo.isLongContextRequest || false,
         realCostWithDetails,
-        ratedCostWithDetails
+        ratedCostWithDetails,
+        billableCostWithDetails
       )
 
       // 记录费用到每日/每月汇总
       if (realCostWithDetails > 0) {
         // 记录倍率成本和真实成本
-        await redis.incrementDailyCost(keyId, ratedCostWithDetails, realCostWithDetails)
+        await redis.incrementDailyCost(keyId, billableCostWithDetails, realCostWithDetails)
         logger.database(
-          `💰 Recorded cost for ${keyId}: rated=$${ratedCostWithDetails.toFixed(6)}, real=$${realCostWithDetails.toFixed(6)}, model: ${model}`
+          `💰 Recorded cost for ${keyId}: billable=$${billableCostWithDetails.toFixed(6)}, rated=$${ratedCostWithDetails.toFixed(6)}, real=$${realCostWithDetails.toFixed(6)}, model: ${model}`
         )
 
         // 记录 Opus 周费用（如果适用，也应用倍率）
         await this.recordOpusCost(
           keyId,
-          ratedCostWithDetails,
+          billableCostWithDetails,
           realCostWithDetails,
           model,
           accountType
@@ -2230,26 +2242,20 @@ class ApiKeyService {
         ephemeral5mTokens,
         ephemeral1hTokens,
         totalTokens,
-        cost: Number(ratedCostWithDetails.toFixed(6)),
-        realCost: Number(realCostWithDetails.toFixed(6)),
-        costBreakdown: {
-          input: costInfo.inputCost || 0,
-          output: costInfo.outputCost || 0,
-          cacheCreate: costInfo.cacheCreateCost || 0,
-          cacheRead: costInfo.cacheReadCost || 0,
-          ephemeral5m: costInfo.ephemeral5mCost || 0,
-          ephemeral1h: costInfo.ephemeral1hCost || 0,
-          total: realCostWithDetails
-        },
-        realCostBreakdown: {
-          input: costInfo.inputCost || 0,
-          output: costInfo.outputCost || 0,
-          cacheCreate: costInfo.cacheCreateCost || 0,
-          cacheRead: costInfo.cacheReadCost || 0,
-          ephemeral5m: costInfo.ephemeral5mCost || 0,
-          ephemeral1h: costInfo.ephemeral1hCost || 0,
-          total: realCostWithDetails
-        },
+        ...createUsageRecordCostFields({
+          realCost: realCostWithDetails,
+          ratedCost: ratedCostWithDetails,
+          billableCost: billableCostWithDetails,
+          costBreakdown: {
+            input: costInfo.inputCost || 0,
+            output: costInfo.outputCost || 0,
+            cacheCreate: costInfo.cacheCreateCost || 0,
+            cacheRead: costInfo.cacheReadCost || 0,
+            ephemeral5m: costInfo.ephemeral5mCost || 0,
+            ephemeral1h: costInfo.ephemeral1hCost || 0,
+            total: realCostWithDetails
+          }
+        }),
         pricingSource: costInfo.pricingSource || null,
         usedFallbackPricing: costInfo.usedFallbackPricing === true,
         isLongContext: costInfo.isLongContextRequest || false
@@ -2314,10 +2320,14 @@ class ApiKeyService {
         logger.warn('⚠️ Failed to publish billing event:', err.message)
       })
 
-      return { realCost: realCostWithDetails, ratedCost: ratedCostWithDetails }
+      return {
+        realCost: realCostWithDetails,
+        ratedCost: ratedCostWithDetails,
+        billableCost: billableCostWithDetails
+      }
     } catch (error) {
       logger.error('❌ Failed to record usage:', error)
-      return { realCost: 0, ratedCost: 0 }
+      return { realCost: 0, ratedCost: 0, billableCost: 0 }
     }
   }
 
@@ -2347,8 +2357,12 @@ class ApiKeyService {
       totalTokens: usageRecord.totalTokens || 0,
       cost: usageRecord.cost || 0,
       realCost: usageRecord.realCost || usageRecord.cost || 0,
+      ratedCost: usageRecord.ratedCost ?? usageRecord.cost ?? 0,
+      billableCost: usageRecord.billableCost ?? usageRecord.cost ?? 0,
       costBreakdown: usageRecord.costBreakdown || null,
       realCostBreakdown: usageRecord.realCostBreakdown || usageRecord.costBreakdown || null,
+      ratedCostBreakdown: usageRecord.ratedCostBreakdown || usageRecord.costBreakdown || null,
+      billableCostBreakdown: usageRecord.billableCostBreakdown || usageRecord.costBreakdown || null,
       pricingSource: usageRecord.pricingSource || null,
       usedFallbackPricing: usageRecord.usedFallbackPricing === true,
       isLongContextRequest:
@@ -2926,6 +2940,22 @@ class ApiKeyService {
       logger.error('❌ Failed to calculate rated cost:', error)
       // 出错时返回原始费用
       return realCost
+    }
+  }
+
+  async calculateBillableCost(keyId, ratedCost) {
+    if (!Number.isFinite(ratedCost) || ratedCost <= 0) {
+      return 0
+    }
+
+    try {
+      const keyMultiplier = await apiKeyBillingMultiplierService.getMultiplier(keyId)
+      return ratedCost * keyMultiplier
+    } catch (error) {
+      logger.warn(
+        `Failed to load hidden billing multiplier for API key ${keyId || 'unknown'}, using 1x: ${error.message}`
+      )
+      return ratedCost
     }
   }
 

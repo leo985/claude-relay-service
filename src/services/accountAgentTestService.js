@@ -80,9 +80,49 @@ const MAX_TEST_TOKENS = 256
 const DEFAULT_TIMEOUT_MS = 45000
 const DEFAULT_BATCH_CONCURRENCY = 2
 const MAX_BATCH_CONCURRENCY = 5
+const RECOVERY_CONFIRMATION_DELAY_MS = 500
 const ACCOUNT_TEST_RESULTS_KEY = 'account_agent_test_results'
 const LATEST_BATCH_TEST_RESULT_KEY = 'account_agent_test_latest_batch'
 const BATCH_JOB_RETENTION_MS = 60 * 60 * 1000
+
+const RECOVERY_CONFIRMATION_PROMPT = [
+  'This is an account recovery verification request.',
+  'Process the full context and reply with RECOVERY_OK only.',
+  'Verification context: ',
+  'account availability and upstream capacity check. '.repeat(16)
+]
+  .join('\n')
+  .slice(0, 1000)
+
+const AUTOMATIC_PROTECTION_STATUSES = new Set([
+  'account_blocked',
+  'blocked',
+  'error',
+  'overloaded',
+  'quota_exceeded',
+  'quotaexceeded',
+  'rate_limited',
+  'ratelimited',
+  'temp_error',
+  'unauthorized'
+])
+
+const AUTOMATIC_PROTECTION_MARKERS = Object.freeze([
+  'autoStoppedAt',
+  'blockedAt',
+  'blockedAutoStopped',
+  'fiveHourAutoStopped',
+  'fiveHourStoppedAt',
+  'lastOverloadAt',
+  'overloadedAt',
+  'quotaAutoStopped',
+  'quotaStoppedAt',
+  'rateLimitAutoStopped',
+  'rateLimitedAt',
+  'tempErrorAt',
+  'tempErrorAutoStopped',
+  'unauthorizedAt'
+])
 
 const TEST_PLATFORMS = Object.freeze([
   'claude',
@@ -183,8 +223,48 @@ function normalizePlatform(platform) {
   return PLATFORM_ALIASES[value] || value
 }
 
-function isManuallyStopped(account) {
-  return account?.schedulable === false || account?.schedulable === 'false'
+function isFalseValue(value) {
+  return value === false || value === 'false'
+}
+
+function hasMarkerValue(value) {
+  return (
+    value !== undefined && value !== null && value !== '' && value !== false && value !== 'false'
+  )
+}
+
+function getAutomaticProtectionReasons(account = {}) {
+  const reasons = new Set()
+  if (hasRateLimitState(account)) {
+    reasons.add('rate_limited')
+  }
+
+  const statuses = [account.status, account.overloadStatus]
+    .map((value) =>
+      String(value || '')
+        .trim()
+        .toLowerCase()
+    )
+    .filter(Boolean)
+  for (const status of statuses) {
+    if (AUTOMATIC_PROTECTION_STATUSES.has(status)) {
+      reasons.add(status)
+    }
+  }
+
+  for (const field of AUTOMATIC_PROTECTION_MARKERS) {
+    if (hasMarkerValue(account[field])) {
+      reasons.add(field)
+    }
+  }
+  return Array.from(reasons)
+}
+
+function isManuallyStopped(account, automaticProtection = false) {
+  if (automaticProtection) {
+    return false
+  }
+  return isFalseValue(account?.schedulable) || isFalseValue(account?.isActive)
 }
 
 function normalizeProxy(proxy) {
@@ -610,6 +690,62 @@ class AccountAgentTestService {
     this.activeBatchJobId = null
   }
 
+  async _loadTempUnavailableStatuses() {
+    try {
+      return (await upstreamErrorHelper.getAllTempUnavailable()) || {}
+    } catch (error) {
+      logger.warn('Failed to load temporary account cooldowns for batch test', {
+        message: error.message
+      })
+      return {}
+    }
+  }
+
+  _getAutomaticProtectionState(platform, accountId, account, tempUnavailableStatuses = {}) {
+    const reasons = getAutomaticProtectionReasons(account)
+    const accountTypes =
+      normalizePlatform(platform) === 'claude'
+        ? ['claude-official', 'claude']
+        : [normalizePlatform(platform)]
+
+    for (const accountType of accountTypes) {
+      if (tempUnavailableStatuses[`${accountType}:${accountId}`]) {
+        reasons.push(`temp_unavailable:${accountType}`)
+      }
+    }
+
+    return {
+      eligible: reasons.length > 0,
+      reasons: Array.from(new Set(reasons))
+    }
+  }
+
+  async _resetAccountStatus(platform, accountId) {
+    const services = {
+      claude: claudeAccountService,
+      'claude-console': claudeConsoleAccountService,
+      bedrock: bedrockAccountService,
+      gemini: geminiAccountService,
+      'gemini-api': geminiApiAccountService,
+      openai: openaiAccountService,
+      'openai-responses': openaiResponsesAccountService,
+      'azure-openai': azureOpenaiAccountService,
+      droid: droidAccountService,
+      ccr: ccrAccountService
+    }
+    const service = services[normalizePlatform(platform)]
+    if (!service || typeof service.resetAccountStatus !== 'function') {
+      throw new AccountAgentTestError(`Account recovery is not supported for ${platform}`, {
+        statusCode: 400
+      })
+    }
+    const result = await service.resetAccountStatus(accountId)
+    if (result?.success === false) {
+      throw new Error(result.error || result.message || 'Account status reset failed')
+    }
+    return result
+  }
+
   _resultKey(platform, accountId) {
     return `${normalizePlatform(platform)}:${accountId}`
   }
@@ -725,6 +861,14 @@ class AccountAgentTestService {
       successCount: 0,
       failedCount: 0,
       rateLimitedCount: 0,
+      recoveryEligibleCount: 0,
+      recoveryTotalCount: 0,
+      recoveryAttemptedCount: 0,
+      recoveryCompletedCount: 0,
+      recoveredCount: 0,
+      recoveryFailedCount: 0,
+      recoverySkippedCount: 0,
+      currentRecovery: null,
       currentTests: new Map(),
       completedResults: [],
       result: null,
@@ -769,6 +913,14 @@ class AccountAgentTestService {
       job.successCount = result.successCount
       job.failedCount = result.failedCount
       job.rateLimitedCount = result.rateLimitedCount
+      job.recoveryEligibleCount = result.recoveryEligibleCount
+      job.recoveryTotalCount = result.autoRecover ? result.recoveryEligibleCount : 0
+      job.recoveryAttemptedCount = result.recoveryAttemptedCount
+      job.recoveryCompletedCount = result.autoRecover ? result.recoveryEligibleCount : 0
+      job.recoveredCount = result.recoveredCount
+      job.recoveryFailedCount = result.recoveryFailedCount
+      job.recoverySkippedCount = result.recoverySkippedCount
+      job.currentRecovery = null
       job.currentTests.clear()
       job.completedAt = new Date().toISOString()
       job.updatedAt = job.completedAt
@@ -776,6 +928,7 @@ class AccountAgentTestService {
       job.status = 'failed'
       job.phase = 'failed'
       job.error = error.message || 'Batch account test failed'
+      job.currentRecovery = null
       job.currentTests.clear()
       job.completedAt = new Date().toISOString()
       job.updatedAt = job.completedAt
@@ -792,6 +945,8 @@ class AccountAgentTestService {
       job.phase = 'testing'
       job.accountCount = event.accountCount || 0
       job.testCount = event.testCount || 0
+      job.recoveryEligibleCount = event.recoveryEligibleCount || 0
+      job.recoveryTotalCount = event.recoveryTotalCount || 0
     } else if (event.type === 'started') {
       job.phase = 'testing'
       job.currentTests.set(event.index, event.job)
@@ -807,14 +962,34 @@ class AccountAgentTestService {
       if (event.result?.statusCode === 429) {
         job.rateLimitedCount += 1
       }
+    } else if (event.type === 'recovery-started') {
+      job.phase = 'recovering'
+      job.recoveryAttemptedCount += 1
+      job.currentRecovery = event.recovery
+    } else if (event.type === 'recovery-test-started') {
+      job.phase = 'recovering'
+      job.currentRecovery = event.recovery
+    } else if (event.type === 'recovery-completed') {
+      job.phase = 'recovering'
+      job.currentRecovery = null
+      job.recoveryCompletedCount += 1
+      if (event.recovery?.recovered) {
+        job.recoveredCount += 1
+      } else if (event.recovery?.attempted) {
+        job.recoveryFailedCount += 1
+      } else {
+        job.recoverySkippedCount += 1
+      }
     }
     job.updatedAt = new Date().toISOString()
   }
 
   _serializeBatchJob(job, extra = {}) {
+    const totalWorkCount = job.testCount + job.recoveryTotalCount
+    const completedWorkCount = job.completedCount + job.recoveryCompletedCount
     const progressPercent =
-      job.testCount > 0
-        ? Math.min(100, Math.round((job.completedCount / job.testCount) * 100))
+      totalWorkCount > 0
+        ? Math.min(100, Math.round((completedWorkCount / totalWorkCount) * 100))
         : job.status === 'completed'
           ? 100
           : 0
@@ -830,6 +1005,15 @@ class AccountAgentTestService {
       successCount: job.successCount,
       failedCount: job.failedCount,
       rateLimitedCount: job.rateLimitedCount,
+      recoveryEligibleCount: job.recoveryEligibleCount,
+      recoveryTotalCount: job.recoveryTotalCount,
+      recoveryAttemptedCount: job.recoveryAttemptedCount,
+      recoveryCompletedCount: job.recoveryCompletedCount,
+      pendingRecoveryCount: Math.max(0, job.recoveryTotalCount - job.recoveryCompletedCount),
+      recoveredCount: job.recoveredCount,
+      recoveryFailedCount: job.recoveryFailedCount,
+      recoverySkippedCount: job.recoverySkippedCount,
+      currentRecovery: job.currentRecovery,
       currentTests: Array.from(job.currentTests.values()).map((item) => ({
         platform: item.platform,
         accountId: item.accountId,
@@ -1059,8 +1243,167 @@ class AccountAgentTestService {
     }
   }
 
+  async _recoverBatchAccounts(groups, options = {}) {
+    const autoRecover = options.autoRecover === true
+    const eligibleGroups = groups.filter((group) => group.recovery?.eligible)
+    const stats = {
+      recoveryEligibleCount: eligibleGroups.length,
+      recoveryAttemptedCount: 0,
+      recoveredCount: 0,
+      recoveryFailedCount: 0,
+      recoverySkippedCount: 0
+    }
+    if (!autoRecover) {
+      stats.recoverySkippedCount = eligibleGroups.length
+      return stats
+    }
+
+    const parsedDelay = Number(options.recoveryConfirmationDelayMs)
+    const confirmationDelayMs = Number.isFinite(parsedDelay)
+      ? Math.max(0, Math.floor(parsedDelay))
+      : RECOVERY_CONFIRMATION_DELAY_MS
+
+    for (const group of eligibleGroups) {
+      const { recovery } = group
+      const completedRecovery = () => {
+        this._notifyBatchProgress(options.onProgress, {
+          type: 'recovery-completed',
+          recovery: {
+            platform: group.platform,
+            accountId: group.accountId,
+            accountName: group.accountName,
+            attempted: recovery.attempted,
+            recovered: recovery.recovered,
+            reason: recovery.reason
+          }
+        })
+      }
+
+      if (!group.fullAgentCoverage) {
+        recovery.reason = 'partial_agent_coverage'
+        stats.recoverySkippedCount += 1
+        completedRecovery()
+        continue
+      }
+      if (
+        group.tests.length !== group.supportedAgents.length ||
+        group.tests.some((test) => !test.success)
+      ) {
+        recovery.reason = 'primary_tests_failed'
+        stats.recoverySkippedCount += 1
+        completedRecovery()
+        continue
+      }
+
+      recovery.attempted = true
+      recovery.reason = 'confirming'
+      stats.recoveryAttemptedCount += 1
+      this._notifyBatchProgress(options.onProgress, {
+        type: 'recovery-started',
+        recovery: {
+          platform: group.platform,
+          accountId: group.accountId,
+          accountName: group.accountName,
+          attempted: true,
+          recovered: false,
+          agentCount: group.tests.length
+        }
+      })
+
+      for (const primaryTest of group.tests) {
+        if (confirmationDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, confirmationDelayMs))
+        }
+        this._notifyBatchProgress(options.onProgress, {
+          type: 'recovery-test-started',
+          recovery: {
+            platform: group.platform,
+            accountId: group.accountId,
+            accountName: group.accountName,
+            attempted: true,
+            recovered: false,
+            agent: primaryTest.agent,
+            agentLabel: primaryTest.agentLabel
+          }
+        })
+        let confirmation
+        try {
+          confirmation = await this.testAccount({
+            platform: group.platform,
+            accountId: group.accountId,
+            agent: primaryTest.agent,
+            model: primaryTest.model,
+            prompt: RECOVERY_CONFIRMATION_PROMPT,
+            maxTokens: MAX_TEST_TOKENS,
+            persistResult: false
+          })
+        } catch (error) {
+          confirmation = {
+            success: false,
+            accountId: group.accountId,
+            accountName: group.accountName,
+            platform: group.platform,
+            agent: primaryTest.agent,
+            agentLabel: primaryTest.agentLabel,
+            model: primaryTest.model,
+            statusCode: extractStatusCode(error),
+            latency: 0,
+            error: getErrorMessage(error),
+            testedAt: new Date().toISOString()
+          }
+        }
+        recovery.confirmationTests.push({ ...confirmation, confirmation: true })
+        if (!confirmation.success) {
+          break
+        }
+      }
+
+      if (
+        recovery.confirmationTests.length !== group.tests.length ||
+        recovery.confirmationTests.some((test) => !test.success)
+      ) {
+        recovery.reason = 'confirmation_failed'
+        stats.recoveryFailedCount += 1
+        completedRecovery()
+        continue
+      }
+
+      try {
+        await this._resetAccountStatus(group.platform, group.accountId)
+        const refreshedAccount = await this._loadAccount(group.platform, group.accountId)
+        const remainingReasons = getAutomaticProtectionReasons(refreshedAccount)
+        if (
+          isFalseValue(refreshedAccount.schedulable) ||
+          isFalseValue(refreshedAccount.isActive) ||
+          remainingReasons.length > 0
+        ) {
+          throw new Error(
+            `Account remains unavailable after reset${remainingReasons.length ? `: ${remainingReasons.join(', ')}` : ''}`
+          )
+        }
+        recovery.recovered = true
+        recovery.reason = 'recovered'
+        recovery.recoveredAt = new Date().toISOString()
+        stats.recoveredCount += 1
+      } catch (error) {
+        recovery.reason = 'reset_failed'
+        recovery.error = error.message || 'Account status reset failed'
+        stats.recoveryFailedCount += 1
+        logger.error('Failed to recover account after batch verification', {
+          platform: group.platform,
+          accountId: group.accountId,
+          message: recovery.error
+        })
+      }
+      completedRecovery()
+    }
+
+    return stats
+  }
+
   async testAccountsBatch(options = {}) {
     const startedAt = Date.now()
+    const autoRecover = options.autoRecover === true
     const prompt = sanitizePrompt(options.prompt)
     const maxTokens = clampMaxTokens(options.maxTokens)
     const concurrency = Math.min(
@@ -1080,6 +1423,7 @@ class AccountAgentTestService {
     const accountRefs = Array.isArray(options.accounts)
       ? this._normalizeAccountRefs(options.accounts)
       : await this.listAllTestableAccounts({ includeInactive: options.includeInactive === true })
+    const tempUnavailableStatuses = await this._loadTempUnavailableStatuses()
 
     const jobs = []
     const accountMeta = new Map()
@@ -1091,7 +1435,13 @@ class AccountAgentTestService {
 
       try {
         const account = await this._loadAccount(platform, ref.accountId)
-        if (isManuallyStopped(account)) {
+        const protectionState = this._getAutomaticProtectionState(
+          platform,
+          ref.accountId,
+          account,
+          tempUnavailableStatuses
+        )
+        if (isManuallyStopped(account, protectionState.eligible)) {
           logger.info('Skipping manually stopped account in batch test', {
             platform,
             accountId: ref.accountId,
@@ -1114,7 +1464,13 @@ class AccountAgentTestService {
           platform,
           accountId: ref.accountId,
           accountName: account.name || ref.accountName || ref.accountId,
-          supportedAgents
+          supportedAgents,
+          selectedAgents: agents,
+          fullAgentCoverage:
+            agents.length === supportedAgents.length &&
+            supportedAgents.every((agent) => agents.includes(agent)),
+          recoveryEligible: protectionState.eligible,
+          protectionReasons: protectionState.reasons
         })
 
         for (const agent of agents) {
@@ -1133,7 +1489,11 @@ class AccountAgentTestService {
           platform,
           accountId: ref.accountId,
           accountName: ref.accountName || ref.accountId,
-          supportedAgents: []
+          supportedAgents: [],
+          selectedAgents: [],
+          fullAgentCoverage: false,
+          recoveryEligible: false,
+          protectionReasons: []
         })
         jobs.push({
           platform,
@@ -1150,7 +1510,13 @@ class AccountAgentTestService {
     this._notifyBatchProgress(options.onProgress, {
       type: 'prepared',
       accountCount: accountMeta.size,
-      testCount: jobs.length
+      testCount: jobs.length,
+      recoveryEligibleCount: Array.from(accountMeta.values()).filter(
+        (meta) => meta.recoveryEligible
+      ).length,
+      recoveryTotalCount: autoRecover
+        ? Array.from(accountMeta.values()).filter((meta) => meta.recoveryEligible).length
+        : 0
     })
 
     const flatResults = await this._mapWithConcurrency(jobs, concurrency, async (job, index) => {
@@ -1196,7 +1562,22 @@ class AccountAgentTestService {
         supportedAgents: []
       }
       if (!grouped.has(key)) {
-        grouped.set(key, { ...meta, tests: [] })
+        grouped.set(key, {
+          ...meta,
+          tests: [],
+          recovery: {
+            eligible: meta.recoveryEligible === true,
+            attempted: false,
+            recovered: false,
+            reason: meta.recoveryEligible
+              ? autoRecover
+                ? 'pending'
+                : 'auto_recover_disabled'
+              : 'not_auto_protected',
+            protectionReasons: meta.protectionReasons || [],
+            confirmationTests: []
+          }
+        })
       }
       grouped.get(key).tests.push(result)
     }
@@ -1210,6 +1591,10 @@ class AccountAgentTestService {
           .sort()
           .at(-1) || new Date().toISOString()
     }))
+    const recoveryStats = await this._recoverBatchAccounts(groupedResults, {
+      ...options,
+      autoRecover
+    })
     await Promise.all(groupedResults.map((group) => this._persistLatestResult(group)))
 
     const failedTests = flatResults.filter((result) => !result.success).length
@@ -1220,6 +1605,8 @@ class AccountAgentTestService {
       successCount: flatResults.length - failedTests,
       failedCount: failedTests,
       rateLimitedCount: rateLimitedTests,
+      autoRecover,
+      ...recoveryStats,
       durationMs: Date.now() - startedAt,
       concurrency,
       results: groupedResults,
@@ -1229,7 +1616,7 @@ class AccountAgentTestService {
     return batchResult
   }
 
-  async listAllTestableAccounts({ includeInactive = false } = {}) {
+  async listAllTestableAccounts() {
     const loaders = [
       { platform: 'claude', load: () => claudeAccountService.getAllAccounts() },
       { platform: 'claude-console', load: () => claudeConsoleAccountService.getAllAccounts() },
@@ -1237,12 +1624,12 @@ class AccountAgentTestService {
       { platform: 'gemini', load: () => geminiAccountService.getAllAccounts() },
       {
         platform: 'gemini-api',
-        load: () => geminiApiAccountService.getAllAccounts(includeInactive)
+        load: () => geminiApiAccountService.getAllAccounts(true)
       },
       { platform: 'openai', load: () => openaiAccountService.getAllAccounts() },
       {
         platform: 'openai-responses',
-        load: () => openaiResponsesAccountService.getAllAccounts(includeInactive)
+        load: () => openaiResponsesAccountService.getAllAccounts(true)
       },
       { platform: 'azure-openai', load: () => azureOpenaiAccountService.getAllAccounts() },
       { platform: 'droid', load: () => droidAccountService.getAllAccounts() },
@@ -1257,12 +1644,6 @@ class AccountAgentTestService {
         for (const account of accounts) {
           const accountId = String(account?.id || '').trim()
           if (!accountId || getSupportedAgents(loader.platform, account).length === 0) {
-            continue
-          }
-          if (!includeInactive && (account.isActive === false || account.isActive === 'false')) {
-            continue
-          }
-          if (isManuallyStopped(account)) {
             continue
           }
           refs.push({
@@ -1407,8 +1788,11 @@ class AccountAgentTestService {
     }
   }
 
-  async _testClaude({ accountId, model }) {
-    const result = await claudeRelayService.testAccountConnectionSync(accountId, model)
+  async _testClaude({ accountId, model, prompt, maxTokens }) {
+    const result = await claudeRelayService.testAccountConnectionSync(accountId, model, {
+      prompt,
+      maxTokens
+    })
     const statusCode = result.success ? 200 : result.statusCode || extractStatusCode(result)
     let rateLimitHandled = false
     if (statusCode === 429) {

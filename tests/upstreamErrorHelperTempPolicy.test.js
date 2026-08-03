@@ -65,4 +65,37 @@ describe('upstreamErrorHelper temp-unavailable policy', () => {
       reason: 'account_temp_unavailable_disabled'
     })
   })
+
+  it('enforces a 529 cooldown when the caller overrides the account temp policy', async () => {
+    mockClient.hgetall.mockResolvedValue({
+      disableTempUnavailable: 'true'
+    })
+
+    const result = await upstreamErrorHelper.markTempUnavailable(
+      'account-1',
+      'openai-responses',
+      529,
+      600,
+      null,
+      { ignoreDisableTempUnavailable: true }
+    )
+
+    expect(mockClient.del).not.toHaveBeenCalled()
+    expect(mockClient.setex).toHaveBeenCalledWith(
+      'temp_unavailable:openai-responses:account-1',
+      600,
+      expect.any(String)
+    )
+    expect(JSON.parse(mockClient.setex.mock.calls[0][2])).toMatchObject({
+      statusCode: 529,
+      errorType: 'overload',
+      ttlSeconds: 600,
+      cooldownSeconds: 600
+    })
+    expect(result).toMatchObject({
+      success: true,
+      ttlSeconds: 600,
+      errorType: 'overload'
+    })
+  })
 })

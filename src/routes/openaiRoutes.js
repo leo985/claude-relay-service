@@ -12,7 +12,6 @@ const openaiImageRelayService = require('../services/relay/openaiImageRelayServi
 const openaiTokenImageRelayService = require('../services/relay/openaiTokenImageRelayService')
 const apiKeyService = require('../services/apiKeyService')
 const redis = require('../models/redis')
-const crypto = require('crypto')
 const ProxyHelper = require('../utils/proxyHelper')
 const upstreamErrorHelper = require('../utils/upstreamErrorHelper')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
@@ -24,6 +23,7 @@ const {
 } = require('../utils/requestDetailHelper')
 const requestBodyRuleService = require('../services/requestBodyRuleService')
 const CodexToOpenAIConverter = require('../services/codexToOpenAI')
+const { buildSessionHash, extractSessionIdentity } = require('../utils/sessionIdentity')
 const {
   clonePlainObject,
   detectEndpointKindFromPath,
@@ -321,16 +321,11 @@ async function applyRateLimitTracking(
 // 使用统一调度器选择 OpenAI 账户
 async function getOpenAIAuthToken(
   apiKeyData,
-  sessionId = null,
+  sessionHash = null,
   requestedModel = null,
   requestFeatures = {}
 ) {
   try {
-    // 生成会话哈希（如果有会话ID）
-    const sessionHash = sessionId
-      ? crypto.createHash('sha256').update(sessionId).digest('hex')
-      : null
-
     // 使用统一调度器选择账户
     const result = await unifiedOpenAIScheduler.selectAccountForApiKey(
       apiKeyData,
@@ -476,9 +471,9 @@ const handleResponses = async (req, res) => {
     }
 
     // 判断是否为 Codex CLI 的请求（基于 User-Agent）
-    // 支持: codex_vscode, codex_cli_rs, codex_exec (非交互式/脚本模式)
+    // 支持: codex_vscode, codex_cli_rs, codex_exec (非交互式/脚本模式), codex-tui (0.144+ TUI)
     const userAgent = req.headers['user-agent'] || ''
-    const codexCliPattern = /^(codex_vscode|codex_cli_rs|codex_exec)\/[\d.]+/i
+    const codexCliPattern = /^(codex_vscode|codex_cli_rs|codex_exec|codex-tui)\/[\d.]+/i
     const isCodexCLI = codexCliPattern.test(userAgent)
 
     const standardResponsesRoute = isStandardResponsesRoute(req)
@@ -521,17 +516,24 @@ const handleResponses = async (req, res) => {
     // 从最终请求体中提取 service_tier，用于后续费用计算
     req._serviceTier = req.body?.service_tier || null
 
-    // 从最终请求体中提取模型、会话 ID 和流式标志
-    // NOTE: For some clients, prompt_cache_key is the only stable per-session key.
-    const sessionId =
-      req.headers['session_id'] ||
-      req.headers['x-session-id'] ||
-      req.body?.session_id ||
-      req.body?.conversation_id ||
-      req.body?.prompt_cache_key ||
-      null
+    // Use one explicit identity contract and namespace every sticky key by API key.
+    const sessionId = extractSessionIdentity(req)
+    sessionHash = buildSessionHash(apiKeyData.id, sessionId)
 
-    sessionHash = sessionId ? crypto.createHash('sha256').update(sessionId).digest('hex') : null
+    const openaiBinding = apiKeyData.openaiAccountId || ''
+    if (
+      !sessionId &&
+      openaiBinding.startsWith('group:') &&
+      req._stickySessionMissingIdentityLogged !== true
+    ) {
+      req._stickySessionMissingIdentityLogged = true
+      logger.warn('Sticky session disabled: missing session identity', {
+        apiKeyId: apiKeyData.id || 'unknown',
+        apiKeyName: apiKeyData.name || 'unknown',
+        path: req._openaiCompatibleOriginal?.path || req.path,
+        userAgent: req.headers['user-agent'] || 'unknown'
+      })
+    }
 
     const requestedModel = req.body?.model || null
     const schedulerModel = getCodexCompatibleModel(requestedModel)
@@ -581,7 +583,7 @@ const handleResponses = async (req, res) => {
     // 使用调度器选择账户
     ;({ accessToken, accountId, accountType, proxy, account } = await getOpenAIAuthToken(
       apiKeyData,
-      sessionId,
+      sessionHash,
       schedulerModel,
       requestFeatures
     ))
@@ -596,40 +598,42 @@ const handleResponses = async (req, res) => {
     // 如果是 OpenAI-Responses 账户，使用专门的中继服务处理
     if (accountType === 'openai-responses') {
       logger.info(`🔀 Using OpenAI-Responses relay service for account: ${account.name}`)
-      const openaiBinding = apiKeyData.openaiAccountId || ''
       const canRetryWithAlternateAccount = !openaiBinding.startsWith('responses:')
-      const relayOptions = canRetryWithAlternateAccount
-        ? {
-            maxNetworkRetries: 1,
-            selectRetryAccount: async ({ failedAccountIds }) => {
-              if (sessionHash) {
-                await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
-              }
+      const relayOptions = {
+        sessionHash,
+        ...(canRetryWithAlternateAccount
+          ? {
+              maxNetworkRetries: 1,
+              selectRetryAccount: async ({ failedAccountIds }) => {
+                if (sessionHash) {
+                  await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+                }
 
-              const retryFeatures = {
-                ...requestFeatures,
-                openaiResponsesOnly: true,
-                excludeAccountIds: failedAccountIds
-              }
-              const retrySelection = await getOpenAIAuthToken(
-                apiKeyData,
-                sessionId,
-                schedulerModel,
-                retryFeatures
-              )
+                const retryFeatures = {
+                  ...requestFeatures,
+                  openaiResponsesOnly: true,
+                  excludeAccountIds: failedAccountIds
+                }
+                const retrySelection = await getOpenAIAuthToken(
+                  apiKeyData,
+                  sessionHash,
+                  schedulerModel,
+                  retryFeatures
+                )
 
-              if (
-                retrySelection?.accountType !== 'openai-responses' ||
-                !retrySelection.account ||
-                failedAccountIds.includes(retrySelection.account.id)
-              ) {
-                return null
-              }
+                if (
+                  retrySelection?.accountType !== 'openai-responses' ||
+                  !retrySelection.account ||
+                  failedAccountIds.includes(retrySelection.account.id)
+                ) {
+                  return null
+                }
 
-              return retrySelection.account
+                return retrySelection.account
+              }
             }
-          }
-        : {}
+          : {})
+      }
 
       return await openaiResponsesRelayService.handleRequest(
         req,

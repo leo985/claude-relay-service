@@ -151,8 +151,11 @@ const getServiceFromModel = (model) => {
 // 计算 CC 扣费
 const calculateCcCost = (model) => {
   // 使用 isLegacy 判断是否有存储的计费费用
-  if (!model.isLegacy && model.costs?.rated !== undefined) {
-    const ccCost = model.costs.rated
+  if (
+    !model.isLegacy &&
+    (model.costs?.billable !== undefined || model.costs?.rated !== undefined)
+  ) {
+    const ccCost = model.costs.billable ?? model.costs.rated
     if (ccCost >= 1) return '$' + ccCost.toFixed(2)
     if (ccCost >= 0.01) return '$' + ccCost.toFixed(4)
     return '$' + ccCost.toFixed(6)

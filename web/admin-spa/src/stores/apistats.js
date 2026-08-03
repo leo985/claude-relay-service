@@ -251,6 +251,9 @@ export const useApiStatsStore = defineStore('apistats', () => {
           summary.cost += model.costs?.total || 0
         })
 
+        if (typeof result.billingCost === 'number') {
+          summary.cost = result.billingCost
+        }
         summary.formattedCost = formatCost(summary.cost)
 
         // 存储到对应的时间段数据

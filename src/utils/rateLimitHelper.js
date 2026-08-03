@@ -8,7 +8,7 @@ function toNumber(value) {
 }
 
 // keyId 和 accountType 用于计算倍率成本
-// preCalculatedCost: 可选的 { realCost, ratedCost }，由调用方提供以避免重复计算
+// preCalculatedCost: 可选的 { realCost, ratedCost, billableCost }，由调用方提供以避免重复计算
 async function updateRateLimitCounters(
   rateLimitInfo,
   usageSummary,
@@ -18,7 +18,7 @@ async function updateRateLimitCounters(
   preCalculatedCost = null
 ) {
   if (!rateLimitInfo) {
-    return { totalTokens: 0, totalCost: 0, ratedCost: 0 }
+    return { totalTokens: 0, totalCost: 0, ratedCost: 0, billableCost: 0 }
   }
 
   const client = redis.getClient()
@@ -39,6 +39,7 @@ async function updateRateLimitCounters(
 
   let totalCost = 0
   let ratedCost = 0
+  let billableCost = 0
 
   if (
     preCalculatedCost &&
@@ -49,6 +50,10 @@ async function updateRateLimitCounters(
     // eslint-disable-next-line prefer-destructuring
     ratedCost = preCalculatedCost.ratedCost
     totalCost = preCalculatedCost.realCost || 0
+    billableCost =
+      typeof preCalculatedCost.billableCost === 'number' && preCalculatedCost.billableCost > 0
+        ? preCalculatedCost.billableCost
+        : ratedCost
   } else if (
     preCalculatedCost &&
     typeof preCalculatedCost.realCost === 'number' &&
@@ -57,6 +62,7 @@ async function updateRateLimitCounters(
     // 有 realCost 但 ratedCost 为 0 或缺失，使用 realCost
     totalCost = preCalculatedCost.realCost
     ratedCost = preCalculatedCost.realCost
+    billableCost = preCalculatedCost.realCost
   } else {
     // Legacy fallback：调用方未提供费用时自行计算（不支持 1h 缓存等特殊计费）
     const usagePayload = {
@@ -101,13 +107,13 @@ async function updateRateLimitCounters(
         ratedCost = totalCost
       }
     }
+    billableCost = ratedCost
   }
 
-  if (ratedCost > 0 && rateLimitInfo.costCountKey) {
-    await client.incrbyfloat(rateLimitInfo.costCountKey, ratedCost)
+  if (billableCost > 0 && rateLimitInfo.costCountKey) {
+    await client.incrbyfloat(rateLimitInfo.costCountKey, billableCost)
   }
-
-  return { totalTokens, totalCost, ratedCost }
+  return { totalTokens, totalCost, ratedCost, billableCost }
 }
 
 module.exports = {

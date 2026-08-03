@@ -3413,8 +3413,12 @@ class ClaudeRelayService {
 
   // 🧪 非流式测试账号连接（供定时任务使用）
   // 复用流式请求方法，收集结果后返回
-  async testAccountConnectionSync(accountId, model = 'claude-sonnet-4-5-20250929') {
-    const testRequestBody = createClaudeTestPayload(model, { stream: true })
+  async testAccountConnectionSync(accountId, model = 'claude-sonnet-4-5-20250929', options = {}) {
+    const testRequestBody = createClaudeTestPayload(model, {
+      stream: true,
+      prompt: options.prompt,
+      maxTokens: options.maxTokens
+    })
     const startTime = Date.now()
 
     try {

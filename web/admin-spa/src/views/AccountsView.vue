@@ -81,7 +81,7 @@
                 <input
                   v-model="searchKeyword"
                   class="h-10 w-full rounded-lg border border-gray-200 bg-white px-3 pl-9 text-sm text-gray-700 placeholder-gray-400 shadow-sm transition-all duration-200 hover:border-gray-300 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:placeholder-gray-500 dark:hover:border-gray-500"
-                  placeholder="搜索账户名称..."
+                  placeholder="搜索名称、邮箱或描述..."
                   type="text"
                 />
                 <i class="fas fa-search absolute left-3 text-sm text-cyan-500" />
@@ -484,7 +484,7 @@
                   最后使用
                 </th>
                 <th
-                  class="min-w-[80px] cursor-pointer px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-600"
+                  class="min-w-[210px] cursor-pointer px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-600"
                   @click="sortAccounts('priority')"
                 >
                   优先级
@@ -949,6 +949,13 @@
                     @error="(error) => handleBalanceError(account.id, error)"
                     @refreshed="(data) => handleBalanceRefreshed(account.id, data)"
                   />
+                  <AccountQuotaPresets
+                    v-if="supportsQuickQuota(account)"
+                    :loading="account.isUpdatingQuota"
+                    :pending-value="account.pendingQuota"
+                    :value="account.dailyQuota"
+                    @select="(quota) => setQuickQuota(account, quota)"
+                  />
                   <div class="mt-1 text-xs">
                     <button
                       v-if="
@@ -1311,7 +1318,7 @@
                       account.platform === 'droid' ||
                       account.platform === 'gemini-api'
                     "
-                    class="flex items-center gap-2"
+                    class="flex min-w-[190px] items-center gap-3"
                   >
                     <div class="h-2 w-16 rounded-full bg-gray-200">
                       <div
@@ -1322,6 +1329,13 @@
                     <span class="min-w-[20px] text-xs font-medium text-gray-700 dark:text-gray-200">
                       {{ account.priority || 50 }}
                     </span>
+                    <AccountPriorityPresets
+                      v-if="supportsQuickPriority(account)"
+                      :loading="account.isUpdatingPriority"
+                      :pending-value="account.pendingPriority"
+                      :value="account.priority || 50"
+                      @select="(priority) => setQuickPriority(account, priority)"
+                    />
                   </div>
                   <div v-else class="text-sm text-gray-400">
                     <span class="text-xs">N/A</span>
@@ -1668,6 +1682,13 @@
               @error="(error) => handleBalanceError(account.id, error)"
               @refreshed="(data) => handleBalanceRefreshed(account.id, data)"
             />
+            <AccountQuotaPresets
+              v-if="supportsQuickQuota(account)"
+              :loading="account.isUpdatingQuota"
+              :pending-value="account.pendingQuota"
+              :value="account.dailyQuota"
+              @select="(quota) => setQuickQuota(account, quota)"
+            />
             <div class="mt-1 text-xs">
               <button
                 v-if="!(account.platform === 'gemini' && account.oauthProvider === 'antigravity')"
@@ -1929,11 +1950,21 @@
             </div>
 
             <!-- 调度优先级 -->
-            <div class="flex items-center justify-between text-xs">
+            <div class="flex items-center justify-between gap-3 text-xs">
               <span class="text-gray-500 dark:text-gray-400">优先级</span>
-              <span class="font-medium text-gray-700 dark:text-gray-200">
+              <span
+                v-if="!supportsQuickPriority(account)"
+                class="font-medium text-gray-700 dark:text-gray-200"
+              >
                 {{ account.priority || 50 }}
               </span>
+              <AccountPriorityPresets
+                v-else
+                :loading="account.isUpdatingPriority"
+                :pending-value="account.pendingPriority"
+                :value="account.priority || 50"
+                @select="(priority) => setQuickPriority(account, priority)"
+              />
             </div>
           </div>
 
@@ -2166,9 +2197,11 @@
       :history="accountUsageHistory"
       :loading="accountUsageLoading"
       :overview="accountUsageOverview"
+      :range-days="accountUsageRangeDays"
       :show="showAccountUsageModal"
       :summary="accountUsageSummary"
       @close="closeAccountUsageModal"
+      @range-change="changeAccountUsageRange"
     />
 
     <!-- 错误历史弹窗 -->
@@ -2214,7 +2247,7 @@
     />
 
     <!-- 全账号多 Agent 测试结果 -->
-    <el-dialog v-model="showBatchTestModal" title="全账号多 Agent 测试" width="92%">
+    <el-dialog v-model="showBatchTestModal" title="全账号多 Agent 恢复验证" width="92%">
       <div class="space-y-4">
         <div
           v-if="batchTestRunning"
@@ -2226,7 +2259,11 @@
               {{ batchTestPhaseText }}
             </div>
             <div class="tabular-nums text-cyan-700 dark:text-cyan-300">
-              {{ batchTestCompletedCount }} / {{ batchTestResult?.testCount || 0 }} 项
+              主测试 {{ batchTestCompletedCount }} / {{ batchTestResult?.testCount || 0 }} 项
+              <span v-if="(batchTestResult?.recoveryTotalCount || 0) > 0" class="ml-2">
+                恢复确认 {{ batchTestResult?.recoveryCompletedCount || 0 }} /
+                {{ batchTestResult?.recoveryTotalCount || 0 }} 个账号
+              </span>
               <span class="ml-2 font-semibold">{{ batchTestProgressPercent }}%</span>
             </div>
           </div>
@@ -2248,11 +2285,12 @@
             </span>
           </div>
           <p class="mt-2 text-xs text-cyan-600 dark:text-cyan-400">
-            测试会产生真实上游请求；关闭弹窗不会中断任务。
+            测试会产生真实上游请求；自动保护账号仅在全 Agent
+            主测试和增强确认均通过后恢复，手动停用账号不会参与。
           </p>
         </div>
 
-        <div v-if="batchTestResult" class="grid gap-3 sm:grid-cols-5">
+        <div v-if="batchTestResult" class="grid gap-3 sm:grid-cols-6">
           <div class="rounded-xl bg-gray-50 p-3 dark:bg-gray-800">
             <div class="text-xs text-gray-500">账号</div>
             <div class="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">
@@ -2283,13 +2321,24 @@
               {{ batchTestResult.rateLimitedCount }}
             </div>
           </div>
+          <div class="rounded-xl bg-cyan-50 p-3 dark:bg-cyan-900/20">
+            <div class="text-xs text-cyan-600 dark:text-cyan-300">自动恢复</div>
+            <div class="mt-1 text-xl font-semibold text-cyan-700 dark:text-cyan-200">
+              {{ batchTestResult.recoveredCount || 0 }} /
+              {{ batchTestResult.recoveryEligibleCount || 0 }}
+            </div>
+            <div class="mt-1 text-xs text-cyan-600/80 dark:text-cyan-300/80">
+              失败 {{ batchTestResult.recoveryFailedCount || 0 }} · 跳过
+              {{ batchTestResult.recoverySkippedCount || 0 }}
+            </div>
+          </div>
         </div>
 
         <div
           v-if="batchFlatResults.length > 0"
           class="max-h-[60vh] overflow-auto rounded-xl border border-gray-200 dark:border-gray-700"
         >
-          <table class="w-full min-w-[920px] text-sm">
+          <table class="w-full min-w-[1060px] text-sm">
             <thead class="sticky top-0 bg-gray-100 dark:bg-gray-800">
               <tr>
                 <th class="px-3 py-2 text-left">平台</th>
@@ -2299,6 +2348,7 @@
                 <th class="px-3 py-2 text-center">状态</th>
                 <th class="px-3 py-2 text-left">结果</th>
                 <th class="px-3 py-2 text-left">限流处理</th>
+                <th class="px-3 py-2 text-left">恢复处理</th>
                 <th class="px-3 py-2 text-left">测试时间</th>
               </tr>
             </thead>
@@ -2350,6 +2400,18 @@
                   <span v-else class="text-gray-500">
                     {{ formatRateLimitMarkReason(item.rateLimitMarkReason) }}
                   </span>
+                </td>
+                <td class="px-3 py-2">
+                  <span :class="getRecoveryStatusClass(item.recovery)">
+                    {{ formatRecoveryStatus(item.recovery) }}
+                  </span>
+                  <div
+                    v-if="item.recoveryError"
+                    class="mt-1 max-w-[220px] truncate text-xs text-red-500"
+                    :title="item.recoveryError"
+                  >
+                    {{ item.recoveryError }}
+                  </div>
                 </td>
                 <td class="whitespace-nowrap px-3 py-2 text-xs text-gray-500">
                   {{ formatTestedAt(item.testedAt) }}
@@ -2534,6 +2596,8 @@ import ActionDropdown from '@/components/common/ActionDropdown.vue'
 import GroupManagementModal from '@/components/accounts/GroupManagementModal.vue'
 import BalanceDisplay from '@/components/accounts/BalanceDisplay.vue'
 import AccountBalanceScriptModal from '@/components/accounts/AccountBalanceScriptModal.vue'
+import AccountQuotaPresets from '@/components/accounts/AccountQuotaPresets.vue'
+import AccountPriorityPresets from '@/components/accounts/AccountPriorityPresets.vue'
 
 // 确认弹窗状态
 const showConfirmModal = ref(false)
@@ -2651,6 +2715,8 @@ const accountUsageSummary = ref({})
 const accountUsageOverview = ref({})
 const accountUsageGeneratedAt = ref('')
 const accountExceptionSummary = ref(null)
+const accountUsageRangeDays = ref(30)
+let accountUsageRequestId = 0
 
 const supportedUsagePlatforms = [
   'claude',
@@ -2854,7 +2920,8 @@ const collectAccountSearchableStrings = (account) => {
     account?.identifier,
     account?.alias,
     account?.title,
-    account?.label
+    account?.label,
+    account?.description
   ]
 
   baseFields.forEach((field) => {
@@ -2993,14 +3060,12 @@ const getAccountActions = (account) => {
   return actions
 }
 
-const openAccountUsageModal = async (account) => {
-  if (!canViewUsage(account)) {
-    showToast('该账户类型暂不支持查看详情', 'warning')
-    return
-  }
+const loadAccountUsage = async (days) => {
+  const account = selectedAccountForUsage.value
+  if (!account) return
 
-  selectedAccountForUsage.value = account
-  showAccountUsageModal.value = true
+  const requestId = ++accountUsageRequestId
+  accountUsageRangeDays.value = days
   accountUsageLoading.value = true
   accountUsageHistory.value = []
   accountUsageSummary.value = {}
@@ -3008,9 +3073,11 @@ const openAccountUsageModal = async (account) => {
   accountUsageGeneratedAt.value = ''
   accountExceptionSummary.value = null
 
-  const response = await httpApis.getAccountUsageHistoryApi(account.id, account.platform, 30, {
+  const response = await httpApis.getAccountUsageHistoryApi(account.id, account.platform, days, {
     includeExceptions: true
   })
+  if (requestId !== accountUsageRequestId || !showAccountUsageModal.value) return
+
   if (response.success) {
     const data = response.data || {}
     accountUsageHistory.value = data.history || []
@@ -3019,12 +3086,30 @@ const openAccountUsageModal = async (account) => {
     accountUsageGeneratedAt.value = data.generatedAt || ''
     accountExceptionSummary.value = data.exceptionSummary || null
   } else {
-    showToast(response.error || '加载账号使用详情失败', 'error')
+    showToast(response.error || response.message || '加载账号使用详情失败', 'error')
   }
   accountUsageLoading.value = false
 }
 
+const openAccountUsageModal = async (account) => {
+  if (!canViewUsage(account)) {
+    showToast('该账户类型暂不支持查看详情', 'warning')
+    return
+  }
+
+  selectedAccountForUsage.value = account
+  showAccountUsageModal.value = true
+  accountUsageRangeDays.value = 30
+  await loadAccountUsage(accountUsageRangeDays.value)
+}
+
+const changeAccountUsageRange = async (days) => {
+  if (![1, 3, 7, 30].includes(days) || days === accountUsageRangeDays.value) return
+  await loadAccountUsage(days)
+}
+
 const closeAccountUsageModal = () => {
+  accountUsageRequestId += 1
   showAccountUsageModal.value = false
   accountUsageLoading.value = false
   selectedAccountForUsage.value = null
@@ -3162,12 +3247,20 @@ const getLatestAccountTestResultIcon = (account) => {
 
 const buildBatchResultFromGroups = (groups = []) => {
   const tests = groups.flatMap((group) => group.tests || [])
+  const recoveryEligible = groups.filter((group) => group.recovery?.eligible)
   return {
     accountCount: groups.length,
     testCount: tests.length,
     successCount: tests.filter((test) => test.success).length,
     failedCount: tests.filter((test) => !test.success).length,
     rateLimitedCount: tests.filter((test) => test.statusCode === 429).length,
+    recoveryEligibleCount: recoveryEligible.length,
+    recoveryAttemptedCount: recoveryEligible.filter((group) => group.recovery?.attempted).length,
+    recoveredCount: recoveryEligible.filter((group) => group.recovery?.recovered).length,
+    recoveryFailedCount: recoveryEligible.filter(
+      (group) => group.recovery?.attempted && !group.recovery?.recovered
+    ).length,
+    recoverySkippedCount: recoveryEligible.filter((group) => !group.recovery?.attempted).length,
     results: groups
   }
 }
@@ -3195,14 +3288,19 @@ const formatTestedAt = (value) => {
 
 const batchFlatResults = computed(() => {
   const groups = batchTestResult.value?.results || []
-  return groups.flatMap((group) =>
-    (group.tests || []).map((test) => ({
+  return groups.flatMap((group) => {
+    const failedConfirmation = (group.recovery?.confirmationTests || []).find(
+      (test) => !test.success
+    )
+    return (group.tests || []).map((test) => ({
       ...test,
       platform: group.platform || test.platform,
       accountId: group.accountId || test.accountId,
-      accountName: group.accountName || test.accountName
+      accountName: group.accountName || test.accountName,
+      recovery: group.recovery || null,
+      recoveryError: group.recovery?.error || failedConfirmation?.error || ''
     }))
-  )
+  })
 })
 
 const getPlatformLabel = (platform) => {
@@ -3224,6 +3322,32 @@ const formatRateLimitMarkReason = (reason) => {
   return labels[reason] || reason || '未标记'
 }
 
+const formatRecoveryStatus = (recovery) => {
+  const labels = {
+    recovered: '已自动恢复',
+    confirming: '增强确认中',
+    confirmation_failed: '增强确认失败',
+    primary_tests_failed: '主测试未全部通过',
+    partial_agent_coverage: '未覆盖全部 Agent',
+    reset_failed: '状态恢复失败',
+    pending: '等待恢复确认',
+    auto_recover_disabled: '自动恢复未启用',
+    not_auto_protected: '无需恢复'
+  }
+  return labels[recovery?.reason] || recovery?.reason || '无需恢复'
+}
+
+const getRecoveryStatusClass = (recovery) => {
+  if (recovery?.recovered) return 'text-emerald-700 dark:text-emerald-300'
+  if (['confirmation_failed', 'reset_failed'].includes(recovery?.reason)) {
+    return 'text-red-700 dark:text-red-300'
+  }
+  if (['primary_tests_failed', 'partial_agent_coverage'].includes(recovery?.reason)) {
+    return 'text-amber-700 dark:text-amber-300'
+  }
+  return 'text-gray-500 dark:text-gray-400'
+}
+
 const batchTestCompletedCount = computed(() => Number(batchTestResult.value?.completedCount) || 0)
 
 const batchTestProgressPercent = computed(() => {
@@ -3237,6 +3361,14 @@ const batchCurrentTests = computed(() => batchTestResult.value?.currentTests || 
 
 const batchTestPhaseText = computed(() => {
   if (batchTestResult.value?.phase === 'discovering') return '正在读取可测试账号'
+  if (batchTestResult.value?.phase === 'recovering') {
+    const recovery = batchTestResult.value?.currentRecovery
+    if (recovery?.accountName || recovery?.accountId) {
+      const agent = recovery.agentLabel || recovery.agent
+      return `正在确认并恢复 ${recovery.accountName || recovery.accountId}${agent ? ` · ${agent}` : ''}`
+    }
+    return '正在处理账号恢复确认'
+  }
   if (batchCurrentTests.value.length > 0) return '正在调用上游进行测试'
   return '正在准备下一批测试'
 })
@@ -3251,6 +3383,14 @@ const applyBatchTestJob = (job) => {
     successCount: job.successCount || 0,
     failedCount: job.failedCount || 0,
     rateLimitedCount: job.rateLimitedCount || 0,
+    recoveryEligibleCount: job.recoveryEligibleCount || 0,
+    recoveryTotalCount: job.recoveryTotalCount || 0,
+    recoveryAttemptedCount: job.recoveryAttemptedCount || 0,
+    recoveryCompletedCount: job.recoveryCompletedCount || 0,
+    recoveredCount: job.recoveredCount || 0,
+    recoveryFailedCount: job.recoveryFailedCount || 0,
+    recoverySkippedCount: job.recoverySkippedCount || 0,
+    currentRecovery: job.currentRecovery || null,
     progressPercent: job.progressPercent || 0,
     currentTests: job.currentTests || [],
     results: job.result?.results || job.results || [],
@@ -3297,9 +3437,13 @@ const pollBatchTestJob = async (jobId) => {
       latestBatchTestResult.value = { ...batchTestResult.value }
       const failed = batchTestResult.value.failedCount || 0
       const total = batchTestResult.value.testCount || 0
+      const recovered = batchTestResult.value.recoveredCount || 0
+      const recoveryIssues = (batchTestResult.value.recoveryEligibleCount || 0) - recovered
       showToast(
-        failed > 0 ? `全量测试完成：${failed}/${total} 项失败` : `全量测试完成：${total} 项通过`,
-        failed > 0 ? 'warning' : 'success'
+        failed > 0 || recoveryIssues > 0
+          ? `全量测试完成：${failed}/${total} 项失败，自动恢复 ${recovered} 个账号`
+          : `全量测试完成：${total} 项通过，自动恢复 ${recovered} 个账号`,
+        failed > 0 || recoveryIssues > 0 ? 'warning' : 'success'
       )
       await loadAccounts(true)
     } else {
@@ -3325,8 +3469,8 @@ const startBatchAccountTests = async () => {
   }
 
   const confirmed = await showConfirm(
-    '全账号多 Agent 测试',
-    '将对所有支持的账号按兼容 Agent 发起真实上游测试请求，可能消耗额度并触发限流标记。是否继续？',
+    '全账号多 Agent 恢复验证',
+    '将对所有非手动停用账号发起真实上游请求。自动保护账号只有在全部兼容 Agent 主测试和第二轮增强确认均通过后才会恢复调度，测试会消耗额度。是否继续？',
     '开始测试',
     '取消'
   )
@@ -3341,6 +3485,14 @@ const startBatchAccountTests = async () => {
     successCount: 0,
     failedCount: 0,
     rateLimitedCount: 0,
+    recoveryEligibleCount: 0,
+    recoveryTotalCount: 0,
+    recoveryAttemptedCount: 0,
+    recoveryCompletedCount: 0,
+    recoveredCount: 0,
+    recoveryFailedCount: 0,
+    recoverySkippedCount: 0,
+    currentRecovery: null,
     progressPercent: 0,
     currentTests: [],
     results: [],
@@ -3351,7 +3503,8 @@ const startBatchAccountTests = async () => {
   try {
     const response = await httpApis.startBatchAccountTestsApi({
       prompt: 'Reply with OK only.',
-      maxTokens: 32
+      maxTokens: 32,
+      autoRecover: true
     })
     if (response?.success && response.data) {
       batchTestJobId.value = response.data.id
@@ -4776,9 +4929,160 @@ const TOGGLE_SCHEDULABLE_ENDPOINT_MAP = {
   'gemini-api': (id) => `/admin/gemini-api-accounts/${id}/toggle-schedulable`
 }
 
+const QUICK_QUOTA_ENDPOINT_MAP = {
+  'claude-console': (id) => `/admin/claude-console-accounts/${id}`,
+  'openai-responses': (id) => `/admin/openai-responses-accounts/${id}`,
+  ccr: (id) => `/admin/ccr-accounts/${id}`
+}
+
+const QUICK_PRIORITY_ENDPOINT_MAP = {
+  claude: (id) => `/admin/claude-accounts/${id}`,
+  'claude-console': (id) => `/admin/claude-console-accounts/${id}`,
+  bedrock: (id) => `/admin/bedrock-accounts/${id}`,
+  gemini: (id) => `/admin/gemini-accounts/${id}`,
+  'gemini-api': (id) => `/admin/gemini-api-accounts/${id}`,
+  openai: (id) => `/admin/openai-accounts/${id}`,
+  'openai-responses': (id) => `/admin/openai-responses-accounts/${id}`,
+  azure_openai: (id) => `/admin/azure-openai-accounts/${id}`,
+  'azure-openai': (id) => `/admin/azure-openai-accounts/${id}`,
+  ccr: (id) => `/admin/ccr-accounts/${id}`,
+  droid: (id) => `/admin/droid-accounts/${id}`
+}
+
 const resolveEndpointByPlatform = (mapping, platform, id) => {
   const builder = mapping[platform]
   return typeof builder === 'function' ? builder(id) : ''
+}
+
+const supportsQuickQuota = (account) =>
+  !!resolveEndpointByPlatform(QUICK_QUOTA_ENDPOINT_MAP, account?.platform, account?.id)
+
+const supportsQuickPriority = (account) =>
+  !!resolveEndpointByPlatform(QUICK_PRIORITY_ENDPOINT_MAP, account?.platform, account?.id)
+
+const updateQuotaBalanceInfo = (balanceInfo, account, quota) => {
+  if (!balanceInfo) return balanceInfo
+
+  const usedFromBalance = Number(balanceInfo.quota?.used)
+  const usedFromAccount = Number(account?.usage?.daily?.cost || 0)
+  const used = Number.isFinite(usedFromBalance) ? usedFromBalance : usedFromAccount
+  const remaining = Math.max(0, quota - used)
+  const percentage = quota > 0 ? Math.round((used / quota) * 10000) / 100 : 0
+  const currency = balanceInfo.balance?.currency || 'USD'
+  const nextBalance =
+    balanceInfo.source === 'local' && balanceInfo.balance
+      ? {
+          ...balanceInfo.balance,
+          amount: remaining,
+          formattedAmount: new Intl.NumberFormat('en-US', {
+            style: 'currency',
+            currency
+          }).format(remaining)
+        }
+      : balanceInfo.balance
+
+  return {
+    ...balanceInfo,
+    balance: nextBalance,
+    quota: {
+      ...(balanceInfo.quota || {}),
+      daily: quota,
+      used,
+      remaining,
+      percentage,
+      unlimited: false
+    }
+  }
+}
+
+const setQuickQuotaState = (target, updates) => {
+  accounts.value = accounts.value.map((account) =>
+    account.id === target.id && account.platform === target.platform
+      ? { ...account, ...updates }
+      : account
+  )
+}
+
+const setQuickPriorityState = (target, updates) => {
+  accounts.value = accounts.value.map((account) =>
+    account.id === target.id && account.platform === target.platform
+      ? { ...account, ...updates }
+      : account
+  )
+}
+
+const setQuickPriority = async (account, priorityValue) => {
+  const priority = Number(priorityValue)
+  if (!Number.isInteger(priority) || priority < 1 || priority > 100 || account.isUpdatingPriority) {
+    return
+  }
+  if (Number(account.priority || 50) === priority) return
+
+  const endpoint = resolveEndpointByPlatform(
+    QUICK_PRIORITY_ENDPOINT_MAP,
+    account.platform,
+    account.id
+  )
+  if (!endpoint) {
+    showToast('该账户类型暂不支持快捷设置优先级', 'warning')
+    return
+  }
+
+  setQuickPriorityState(account, { isUpdatingPriority: true, pendingPriority: priority })
+
+  try {
+    const data = await httpApis.updateAccountByEndpointApi(endpoint, { priority })
+    if (!data?.success) {
+      showToast(data?.message || data?.error || '优先级更新失败', 'error')
+      return
+    }
+
+    setQuickPriorityState(account, { priority })
+    showToast(`${account.name || account.id} 的优先级已设置为 ${priority}`, 'success')
+  } catch (error) {
+    showToast(error.message || '优先级更新失败', 'error')
+  } finally {
+    setQuickPriorityState(account, { isUpdatingPriority: false, pendingPriority: null })
+  }
+}
+
+const setQuickQuota = async (account, quotaValue) => {
+  const quota = Number(quotaValue)
+  if (![50, 100, 150].includes(quota) || account.isUpdatingQuota) return
+  if (Number(account.dailyQuota) === quota) return
+
+  const endpoint = resolveEndpointByPlatform(QUICK_QUOTA_ENDPOINT_MAP, account.platform, account.id)
+  if (!endpoint) {
+    showToast('该账户类型暂不支持每日配额', 'warning')
+    return
+  }
+
+  setQuickQuotaState(account, { isUpdatingQuota: true, pendingQuota: quota })
+
+  try {
+    const data = await httpApis.updateAccountByEndpointApi(endpoint, { dailyQuota: quota })
+    if (!data?.success) {
+      showToast(data?.message || data?.error || '配额更新失败', 'error')
+      return
+    }
+
+    const currentAccount = accounts.value.find(
+      (item) => item.id === account.id && item.platform === account.platform
+    )
+    setQuickQuotaState(account, {
+      dailyQuota: quota,
+      balanceInfo: updateQuotaBalanceInfo(
+        currentAccount?.balanceInfo,
+        currentAccount || account,
+        quota
+      )
+    })
+    showToast(`${account.name || account.id} 每日配额已设置为 $${quota}`, 'success')
+  } catch (error) {
+    showToast(error.message || '配额更新失败', 'error')
+  } finally {
+    setQuickQuotaState(account, { isUpdatingQuota: false, pendingQuota: null })
+  }
 }
 
 // 重置账户状态

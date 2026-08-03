@@ -37,7 +37,7 @@
                 </span>
               </div>
               <p class="text-xs text-gray-500 dark:text-gray-400 sm:text-sm">
-                近 {{ summary?.days || 30 }} 天内的费用与请求趋势
+                {{ periodLabel }}的费用与请求趋势
                 <span v-if="summary?.actualDaysUsed && summary?.actualDaysUsed < summary?.days">
                   (日均基于实际使用 {{ summary.actualDaysUsed }} 天)
                 </span>
@@ -56,6 +56,37 @@
               @click="handleClose"
             >
               <i class="fas fa-times" />
+            </button>
+          </div>
+        </div>
+
+        <div
+          class="flex flex-col gap-2 border-b border-gray-100 bg-gray-50/80 px-5 py-3 dark:border-gray-800 dark:bg-gray-900/60 sm:flex-row sm:items-center sm:justify-between sm:px-6"
+        >
+          <div class="flex items-center gap-2 text-xs font-medium text-gray-500 dark:text-gray-400">
+            <i class="fas fa-calendar-days text-blue-500" />
+            统计范围
+          </div>
+          <div
+            aria-label="账号详情统计范围"
+            class="grid grid-cols-4 gap-1 rounded-xl bg-gray-200/70 p-1 dark:bg-gray-800"
+            role="group"
+          >
+            <button
+              v-for="option in rangeOptions"
+              :key="option.days"
+              :aria-pressed="rangeDays === option.days"
+              :class="[
+                'rounded-lg px-3 py-1.5 text-xs font-medium transition sm:min-w-[76px]',
+                rangeDays === option.days
+                  ? 'bg-white text-blue-600 shadow-sm dark:bg-gray-700 dark:text-blue-300'
+                  : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'
+              ]"
+              :disabled="loading"
+              type="button"
+              @click="selectRange(option.days)"
+            >
+              {{ option.label }}
             </button>
           </div>
         </div>
@@ -216,7 +247,7 @@
                 </h4>
                 <div class="space-y-2 text-sm text-gray-600 dark:text-gray-300">
                   <div class="flex items-center justify-between">
-                    <span>30天总计</span>
+                    <span>{{ periodLabel }}总计</span>
                     <span class="font-semibold text-gray-900 dark:text-gray-100">{{
                       formatNumber(totalTokens)
                     }}</span>
@@ -316,7 +347,8 @@
                 <h4
                   class="flex items-center text-sm font-semibold text-gray-700 dark:text-gray-300"
                 >
-                  <i class="fas fa-chart-line mr-2 text-blue-500" /> 30天费用与请求趋势
+                  <i class="fas fa-chart-line mr-2 text-blue-500" />
+                  {{ periodLabel }}费用与请求趋势
                 </h4>
                 <span class="text-xs text-gray-400 dark:text-gray-500">
                   最新更新时间：{{ formatDateTime(generatedAtDisplay) }}
@@ -351,10 +383,11 @@ const props = defineProps({
   overview: { type: Object, default: () => ({}) },
   exceptionSummary: { type: Object, default: null },
   generatedAt: { type: String, default: '' },
-  loading: { type: Boolean, default: false }
+  loading: { type: Boolean, default: false },
+  rangeDays: { type: Number, default: 30 }
 })
 
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'range-change'])
 
 const themeStore = useThemeStore()
 const { isDarkMode } = storeToRefs(themeStore)
@@ -362,6 +395,21 @@ const router = useRouter()
 
 const chartCanvas = ref(null)
 let chartInstance = null
+
+const rangeOptions = [
+  { days: 1, label: '今天' },
+  { days: 3, label: '近3天' },
+  { days: 7, label: '近一周' },
+  { days: 30, label: '近一月' }
+]
+
+const effectiveDays = computed(() => Number(props.summary?.days) || props.rangeDays || 30)
+const periodLabel = computed(() => {
+  if (effectiveDays.value === 1) return '今天'
+  if (effectiveDays.value === 7) return '近一周'
+  if (effectiveDays.value === 30) return '近一月'
+  return `近${effectiveDays.value}天`
+})
 
 const platformLabelMap = {
   claude: 'Claude',
@@ -439,7 +487,7 @@ const generatedAtDisplay = computed(
 const primaryMetrics = computed(() => [
   {
     key: 'totalCost',
-    label: '30天总费用',
+    label: `${periodLabel.value}总费用`,
     value: props.summary?.totalCostFormatted || '$0.000000',
     subtitle: '累计成本',
     icon: 'fa-file-invoice-dollar',
@@ -447,7 +495,7 @@ const primaryMetrics = computed(() => [
   },
   {
     key: 'totalRequests',
-    label: '30天总请求',
+    label: `${periodLabel.value}总请求`,
     value: formatNumber(props.summary?.totalRequests || 0),
     subtitle: '调用次数',
     icon: 'fa-paper-plane',
@@ -586,6 +634,11 @@ const cleanupChart = () => {
 const handleClose = () => {
   cleanupChart()
   emit('close')
+}
+
+const selectRange = (days) => {
+  if (days === props.rangeDays || props.loading) return
+  emit('range-change', days)
 }
 
 const goTimeline = () => {

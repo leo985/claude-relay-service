@@ -43,7 +43,8 @@ class CodexCliValidator {
       // - codex_vscode/0.35.0 (Windows 10.0.26100; x86_64) unknown (Cursor; 0.4.10)
       // - codex_cli_rs/0.38.0 (Ubuntu 22.4.0; x86_64) WindowsTerminal
       // - codex_exec/0.89.0 (Mac OS 26.2.0; arm64) xterm-256color (非交互式/脚本模式)
-      const codexCliPattern = /^(codex_vscode|codex_cli_rs|codex_exec)\/[\d.]+/i
+      // - codex-tui/0.145.0 (Mac OS 15.6.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.145.0)
+      const codexCliPattern = /^(codex_vscode|codex_cli_rs|codex_exec|codex-tui)\/[\d.]+/i
       const uaMatch = userAgent.match(codexCliPattern)
 
       if (!uaMatch) {

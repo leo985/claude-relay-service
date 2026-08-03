@@ -1510,12 +1510,16 @@ class ClaudeConsoleAccountService {
       const fieldsToDelete = [
         'rateLimitedAt',
         'rateLimitStatus',
+        'rateLimitAutoStopped',
         'unauthorizedAt',
         'unauthorizedCount',
         'overloadedAt',
         'overloadStatus',
         'blockedAt',
-        'quotaStoppedAt'
+        'blockedAutoStopped',
+        'quotaStoppedAt',
+        'quotaAutoStopped',
+        'autoStoppedAt'
       ]
 
       // 执行更新

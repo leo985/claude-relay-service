@@ -92,4 +92,37 @@ describe('redis usage stats all-token display', () => {
     expect(stats.averages.dailyTokens).toBe(160)
     expect(stats.averages.tpm).toBe(0.11)
   })
+
+  test('incrementTokenUsage stores billable model cost for every period', async () => {
+    const commands = []
+    const pipeline = {
+      hincrby: jest.fn((...args) => {
+        commands.push(['hincrby', ...args])
+        return pipeline
+      }),
+      expire: jest.fn(() => pipeline),
+      sadd: jest.fn(() => pipeline),
+      del: jest.fn(() => pipeline),
+      eval: jest.fn((...args) => {
+        commands.push(['eval', ...args])
+        return pipeline
+      }),
+      exec: jest.fn().mockResolvedValue([])
+    }
+    redis.client = { pipeline: jest.fn(() => pipeline) }
+
+    await redis.incrementTokenUsage('key-1', 15, 10, 5, 0, 0, 'gpt-5', 0, 0, false, 1, 1.5, 3.75)
+
+    const billableCommands = commands.filter(([command]) => command === 'eval')
+    expect(billableCommands).toHaveLength(4)
+    expect(billableCommands.every(([, , , , value]) => value === 3750000)).toBe(true)
+    expect(billableCommands.map(([, , , key]) => key)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('usage:key-1:model:daily:gpt-5:'),
+        expect.stringContaining('usage:key-1:model:monthly:gpt-5:'),
+        'usage:key-1:model:alltime:gpt-5',
+        expect.stringContaining('usage:key-1:model:hourly:gpt-5:')
+      ])
+    )
+  })
 })

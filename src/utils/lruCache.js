@@ -70,6 +70,10 @@ class LRUCache {
     })
   }
 
+  delete(key) {
+    return this.cache.delete(key)
+  }
+
   /**
    * 清理过期项
    */

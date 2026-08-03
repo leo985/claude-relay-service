@@ -959,6 +959,30 @@
                             <span class="ml-1">续期</span>
                           </button>
                           <button
+                            class="rounded px-2 py-1 text-xs font-medium text-emerald-600 transition-colors hover:bg-emerald-50 hover:text-emerald-900 dark:text-emerald-400 dark:hover:bg-emerald-900/20"
+                            title="设置隐藏倍率"
+                            @click="openBillingMultiplierModal(key)"
+                          >
+                            <i class="fas fa-percentage" />
+                            <span class="ml-1">倍率</span>
+                          </button>
+                          <button
+                            class="rounded px-2 py-1 text-xs font-medium text-amber-600 transition-colors hover:bg-amber-50 hover:text-amber-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-amber-400 dark:hover:bg-amber-900/20"
+                            :disabled="resettingDailyUsage.has(key.id)"
+                            title="重置今日用量"
+                            @click="resetApiKeyDailyUsage(key)"
+                          >
+                            <i
+                              :class="[
+                                'fas',
+                                resettingDailyUsage.has(key.id)
+                                  ? 'fa-spinner fa-spin'
+                                  : 'fa-rotate-left'
+                              ]"
+                            />
+                            <span class="ml-1">今日清零</span>
+                          </button>
+                          <button
                             :class="[
                               key.isActive
                                 ? 'text-orange-600 hover:bg-orange-50 hover:text-orange-900 dark:hover:bg-orange-900/20'
@@ -1638,7 +1662,9 @@
               </div>
 
               <!-- 操作按钮 -->
-              <div class="mt-3 flex gap-2 border-t border-gray-100 pt-3 dark:border-gray-600">
+              <div
+                class="mt-3 flex flex-wrap gap-2 border-t border-gray-100 pt-3 dark:border-gray-600"
+              >
                 <button
                   class="flex flex-1 items-center justify-center gap-1 rounded-lg bg-blue-50 px-3 py-1.5 text-xs text-blue-600 transition-colors hover:bg-blue-100 dark:bg-blue-900/30 dark:hover:bg-blue-900/50"
                   @click="showUsageDetails(key)"
@@ -1663,6 +1689,26 @@
                 >
                   <i class="fas fa-clock mr-1" />
                   续期
+                </button>
+                <button
+                  class="rounded-lg bg-emerald-50 px-3 py-1.5 text-xs text-emerald-600 transition-colors hover:bg-emerald-100 dark:bg-emerald-900/30 dark:text-emerald-400 dark:hover:bg-emerald-900/50"
+                  title="设置隐藏倍率"
+                  @click="openBillingMultiplierModal(key)"
+                >
+                  <i class="fas fa-percentage" />
+                </button>
+                <button
+                  class="rounded-lg bg-amber-50 px-3 py-1.5 text-xs text-amber-600 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/50"
+                  :disabled="resettingDailyUsage.has(key.id)"
+                  title="重置今日用量"
+                  @click="resetApiKeyDailyUsage(key)"
+                >
+                  <i
+                    :class="[
+                      'fas',
+                      resettingDailyUsage.has(key.id) ? 'fa-spinner fa-spin' : 'fa-rotate-left'
+                    ]"
+                  />
                 </button>
                 <button
                   :class="[
@@ -2146,6 +2192,12 @@
       @open-timeline="openTimeline"
     />
 
+    <ApiKeyBillingMultiplierModal
+      :api-key="billingMultiplierApiKey"
+      :show="showBillingMultiplierModal"
+      @close="closeBillingMultiplierModal"
+    />
+
     <TagManagementModal
       :show="showTagManagementModal"
       @close="showTagManagementModal = false"
@@ -2181,6 +2233,7 @@ import BatchApiKeyModal from '@/components/apikeys/BatchApiKeyModal.vue'
 import BatchEditApiKeyModal from '@/components/apikeys/BatchEditApiKeyModal.vue'
 import ExpiryEditModal from '@/components/apikeys/ExpiryEditModal.vue'
 import UsageDetailModal from '@/components/apikeys/UsageDetailModal.vue'
+import ApiKeyBillingMultiplierModal from '@/components/apikeys/ApiKeyBillingMultiplierModal.vue'
 import TagManagementModal from '@/components/apikeys/TagManagementModal.vue'
 import LimitProgressBar from '@/components/apikeys/LimitProgressBar.vue'
 import CustomDropdown from '@/components/common/CustomDropdown.vue'
@@ -2260,6 +2313,7 @@ const serverPagination = ref({
 const statsCache = ref(new Map())
 // 正在加载统计的 keyIds
 const statsLoading = ref(new Set())
+const resettingDailyUsage = ref(new Set())
 // 最后使用账号缓存: Map<keyId, lastUsageInfo>
 const lastUsageCache = ref(new Map())
 // 正在加载最后使用账号的 keyIds
@@ -2287,6 +2341,8 @@ const editingExpiryKey = ref(null)
 const expiryEditModalRef = ref(null)
 const showUsageDetailModal = ref(false)
 const selectedApiKeyForDetail = ref(null)
+const showBillingMultiplierModal = ref(false)
+const billingMultiplierApiKey = ref(null)
 
 // 标签相关
 const selectedTagFilter = ref('')
@@ -3886,6 +3942,16 @@ const handleRenewSuccess = () => {
   loadApiKeys()
 }
 
+const openBillingMultiplierModal = (apiKey) => {
+  billingMultiplierApiKey.value = apiKey
+  showBillingMultiplierModal.value = true
+}
+
+const closeBillingMultiplierModal = () => {
+  showBillingMultiplierModal.value = false
+  billingMultiplierApiKey.value = null
+}
+
 // 获取API Key的操作菜单项（用于ActionDropdown）
 const getApiKeyActions = (key) => {
   const actions = [
@@ -3909,6 +3975,22 @@ const getApiKeyActions = (key) => {
     })
   }
 
+  actions.push({
+    key: 'billing-multiplier',
+    label: '隐藏倍率',
+    icon: 'fa-percentage',
+    color: 'green',
+    handler: () => openBillingMultiplierModal(key)
+  })
+
+  actions.push({
+    key: 'reset-daily-usage',
+    label: resettingDailyUsage.value.has(key.id) ? '正在重置...' : '重置今日用量',
+    icon: resettingDailyUsage.value.has(key.id) ? 'fa-spinner fa-spin' : 'fa-rotate-left',
+    color: 'orange',
+    handler: () => resetApiKeyDailyUsage(key)
+  })
+
   // 激活/禁用
   actions.push({
     key: 'toggle',
@@ -3928,6 +4010,57 @@ const getApiKeyActions = (key) => {
   })
 
   return actions
+}
+
+const resetApiKeyDailyUsage = async (key) => {
+  if (!key?.id || resettingDailyUsage.value.has(key.id)) return
+
+  const confirmed = await showConfirm(
+    '重置今日用量',
+    `确定将 API Key "${key.name}" 的今日请求数、Token 和费用清零吗？\n\n历史累计、请求时间线、账号用量和当前限流窗口不会被修改。此操作无法恢复。`,
+    '确定清零',
+    '取消',
+    'warning'
+  )
+  if (!confirmed) return
+
+  resettingDailyUsage.value.add(key.id)
+  try {
+    const response = await httpApis.resetApiKeyDailyUsageApi(key.id)
+    if (!response.success) {
+      showToast(response.message || response.error || '重置今日用量失败', 'error')
+      return
+    }
+
+    statsCache.value.delete(key.id)
+    delete apiKeyModelStats.value[key.id]
+    expandedApiKeys.value[key.id] = false
+    key.dailyCost = 0
+    if (key.usage?.daily) {
+      key.usage.daily = {
+        ...key.usage.daily,
+        requests: 0,
+        tokens: 0,
+        allTokens: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreateTokens: 0,
+        cacheReadTokens: 0,
+        cost: 0
+      }
+    }
+
+    const previous = response.data?.previous || {}
+    showToast(
+      `今日用量已清零：${formatNumber(previous.requests || 0)} 次请求，${formatNumber(previous.tokens || 0)} Token`,
+      'success'
+    )
+    await loadApiKeys()
+  } catch {
+    showToast('重置今日用量失败', 'error')
+  } finally {
+    resettingDailyUsage.value.delete(key.id)
+  }
 }
 
 // 切换API Key状态（激活/禁用）

@@ -1104,8 +1104,11 @@ async function resetAccountStatus(accountId) {
     status: account.accessToken ? 'active' : 'created',
     // 恢复可调度状态
     schedulable: 'true',
+    isActive: 'true',
     // 清除错误相关字段
     errorMessage: null,
+    unauthorizedAt: '',
+    unauthorizedCount: '',
     rateLimitedAt: null,
     rateLimitStatus: 'normal',
     rateLimitResetAt: null

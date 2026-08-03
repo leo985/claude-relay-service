@@ -13,6 +13,7 @@ jest.mock('../src/models/redis', () => ({
   getApiKey: jest.fn(),
   incrementTokenUsage: jest.fn(),
   incrementDailyCost: jest.fn(),
+  incrementWeeklyOpusCost: jest.fn(),
   incrementAccountUsage: jest.fn(),
   addUsageRecord: jest.fn()
 }))
@@ -41,6 +42,9 @@ jest.mock('../src/services/serviceRatesService', () => ({
 jest.mock('../src/services/requestDetailService', () => ({
   captureRequestDetail: jest.fn()
 }))
+jest.mock('../src/services/apiKeyBillingMultiplierService', () => ({
+  getMultiplier: jest.fn()
+}))
 jest.mock('../src/services/billingEventPublisher', () => ({
   publishBillingEvent: jest.fn()
 }))
@@ -57,6 +61,7 @@ jest.mock('../src/utils/requestDetailHelper', () => ({
 const redis = require('../src/models/redis')
 const serviceRatesService = require('../src/services/serviceRatesService')
 const requestDetailService = require('../src/services/requestDetailService')
+const apiKeyBillingMultiplierService = require('../src/services/apiKeyBillingMultiplierService')
 const billingEventPublisher = require('../src/services/billingEventPublisher')
 const CostCalculator = require('../src/utils/costCalculator')
 const apiKeyService = require('../src/services/apiKeyService')
@@ -72,11 +77,13 @@ describe('apiKeyService openai responses config', () => {
     redis.setApiKey.mockResolvedValue()
     redis.incrementTokenUsage.mockResolvedValue()
     redis.incrementDailyCost.mockResolvedValue()
+    redis.incrementWeeklyOpusCost.mockResolvedValue()
     redis.incrementAccountUsage.mockResolvedValue()
     redis.addUsageRecord.mockResolvedValue()
     serviceRatesService.getService.mockReturnValue('claude')
     serviceRatesService.getServiceRate.mockResolvedValue(1)
     requestDetailService.captureRequestDetail.mockResolvedValue({ captured: true })
+    apiKeyBillingMultiplierService.getMultiplier.mockResolvedValue(1)
     billingEventPublisher.publishBillingEvent.mockResolvedValue()
   })
 
@@ -219,6 +226,7 @@ describe('apiKeyService openai responses config', () => {
     )
     expect(result.realCost).toBeCloseTo(0.0529974, 10)
     expect(result.ratedCost).toBeCloseTo(0.0529974, 10)
+    expect(result.billableCost).toBeCloseTo(0.0529974, 10)
     expect(redis.incrementDailyCost.mock.calls[0][0]).toBe('key-1')
     expect(redis.incrementDailyCost.mock.calls[0][1]).toBeCloseTo(0.0529974, 10)
     expect(redis.incrementDailyCost.mock.calls[0][2]).toBeCloseTo(0.0529974, 10)
@@ -247,6 +255,48 @@ describe('apiKeyService openai responses config', () => {
         usedFallbackPricing: true,
         pricingSource: 'unknown-fallback'
       })
+    )
+  })
+
+  test('applies the API key multiplier only to billable aggregates', async () => {
+    CostCalculator.calculateCost.mockReturnValue({
+      costs: { input: 0.4, output: 0.6, total: 1 },
+      debug: { usedFallbackPricing: false, pricingSource: 'dynamic' }
+    })
+    apiKeyBillingMultiplierService.getMultiplier.mockResolvedValue(2.5)
+
+    const result = await apiKeyService.recordUsageWithDetails(
+      'key-1',
+      { input_tokens: 100, output_tokens: 20 },
+      'gpt-5',
+      'acct-1',
+      'openai-responses'
+    )
+
+    expect(result).toMatchObject({ realCost: 1, ratedCost: 1, billableCost: 2.5 })
+    expect(apiKeyBillingMultiplierService.getMultiplier).toHaveBeenCalledWith('key-1')
+    expect(redis.incrementTokenUsage).toHaveBeenCalledWith(
+      'key-1',
+      120,
+      100,
+      20,
+      0,
+      0,
+      'gpt-5',
+      0,
+      0,
+      false,
+      1,
+      1,
+      2.5
+    )
+    expect(redis.incrementDailyCost).toHaveBeenCalledWith('key-1', 2.5, 1)
+    expect(redis.addUsageRecord).toHaveBeenCalledWith(
+      'key-1',
+      expect.objectContaining({ cost: 1, realCost: 1, ratedCost: 1, billableCost: 2.5 })
+    )
+    expect(requestDetailService.captureRequestDetail).toHaveBeenCalledWith(
+      expect.objectContaining({ cost: 1, ratedCost: 1, billableCost: 2.5 })
     )
   })
 })

@@ -6,6 +6,8 @@ const logger = require('../../utils/logger')
 const CostCalculator = require('../../utils/costCalculator')
 const config = require('../../../config/config')
 const requestBodyRuleService = require('../../services/requestBodyRuleService')
+const apiKeyMonthlyUsageService = require('../../services/apiKeyMonthlyUsageService')
+const apiKeyDailyUsageService = require('../../services/apiKeyDailyUsageService')
 
 const router = express.Router()
 
@@ -130,6 +132,39 @@ router.get('/users', authenticateAdmin, async (req, res) => {
 })
 
 // 🔑 API Keys 管理
+
+// 按需获取单个 Key 最近 30 天的日聚合，不扫描请求明细或 Redis 全局索引
+router.get('/api-keys/:keyId/monthly-usage', authenticateAdmin, async (req, res) => {
+  try {
+    const data = await apiKeyMonthlyUsageService.getUsage(req.params.keyId)
+    return res.json({ success: true, data })
+  } catch (error) {
+    logger.error(`❌ Failed to get monthly usage for API key ${req.params.keyId}:`, error)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to get API key monthly usage',
+      message: error.message
+    })
+  }
+})
+
+router.post('/api-keys/:keyId/reset-daily-usage', authenticateAdmin, async (req, res) => {
+  try {
+    const data = await apiKeyDailyUsageService.reset(req.params.keyId)
+    logger.info(`🔄 Admin reset daily usage for API key ${req.params.keyId}`)
+    return res.json({ success: true, message: 'Daily usage reset successfully', data })
+  } catch (error) {
+    if (error.code === 'API_KEY_NOT_FOUND') {
+      return res.status(404).json({ success: false, error: 'API key not found' })
+    }
+    logger.error(`❌ Failed to reset daily usage for API key ${req.params.keyId}:`, error)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to reset API key daily usage',
+      message: error.message
+    })
+  }
+})
 
 // 调试：获取API Key费用详情
 router.get('/api-keys/:keyId/cost-debug', authenticateAdmin, async (req, res) => {
@@ -1284,6 +1319,8 @@ async function calculateKeyStats(keyId, timeRange, startDate, endDate) {
         requests: 0,
         realCostMicro: 0,
         ratedCostMicro: 0,
+        billableCostMicro: 0,
+        hasStoredBillableCost: false,
         hasStoredCost: false
       })
     }
@@ -1307,12 +1344,17 @@ async function calculateKeyStats(keyId, timeRange, startDate, endDate) {
       stats.ratedCostMicro += parseInt(data.ratedCostMicro) || 0
       stats.hasStoredCost = true
     }
+    if ('billableCostMicro' in data) {
+      stats.billableCostMicro += parseInt(data.billableCostMicro) || 0
+      stats.hasStoredBillableCost = true
+    }
 
     totalRequests += parseInt(data.totalRequests) || parseInt(data.requests) || 0
   }
 
   // 汇总费用：优先使用已存储的费用，仅对无存储费用的旧数据 fallback 到 token 重算
   let totalRatedCost = 0
+  let totalBillableCost = 0
   let totalRealCost = 0
   let inputTokens = 0
   let outputTokens = 0
@@ -1328,6 +1370,9 @@ async function calculateKeyStats(keyId, timeRange, startDate, endDate) {
     if (stats.hasStoredCost) {
       // 使用请求时已计算并存储的费用（精确，包含 1M 上下文、特殊计费等）
       totalRatedCost += stats.ratedCostMicro / 1000000
+      totalBillableCost += stats.hasStoredBillableCost
+        ? stats.billableCostMicro / 1000000
+        : stats.ratedCostMicro / 1000000
       totalRealCost += stats.realCostMicro / 1000000
     } else {
       // Legacy fallback：旧数据没有存储费用，从 token 重算（不精确但聊胜于无）
@@ -1347,6 +1392,7 @@ async function calculateKeyStats(keyId, timeRange, startDate, endDate) {
 
       const costResult = CostCalculator.calculateCost(costUsage, model)
       totalRatedCost += costResult.costs.total
+      totalBillableCost += costResult.costs.total
       totalRealCost += costResult.costs.total
     }
   }
@@ -1360,9 +1406,10 @@ async function calculateKeyStats(keyId, timeRange, startDate, endDate) {
     outputTokens,
     cacheCreateTokens,
     cacheReadTokens,
-    cost: totalRatedCost,
+    cost: totalBillableCost,
+    ratedCost: totalRatedCost,
     realCost: totalRealCost,
-    formattedCost: CostCalculator.formatCost(totalRatedCost),
+    formattedCost: CostCalculator.formatCost(totalBillableCost),
     ...limitData
   }
 }

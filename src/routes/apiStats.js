@@ -395,6 +395,8 @@ router.post('/api/user-stats', async (req, res) => {
                 ephemeral1hTokens: 0,
                 realCostMicro: 0,
                 ratedCostMicro: 0,
+                billableCostMicro: 0,
+                hasStoredBillableCost: false,
                 hasStoredCost: false
               })
             }
@@ -411,6 +413,10 @@ router.post('/api/user-stats', async (req, res) => {
               modelUsage.ratedCostMicro += parseInt(data.ratedCostMicro) || 0
               modelUsage.hasStoredCost = true
             }
+            if ('billableCostMicro' in data) {
+              modelUsage.billableCostMicro += parseInt(data.billableCostMicro) || 0
+              modelUsage.hasStoredBillableCost = true
+            }
           }
         }
 
@@ -418,7 +424,10 @@ router.post('/api/user-stats', async (req, res) => {
         for (const [model, usage] of modelUsageMap) {
           if (usage.hasStoredCost) {
             // 使用请求时已存储的费用（精确）
-            totalCost += usage.ratedCostMicro / 1000000
+            totalCost +=
+              (usage.hasStoredBillableCost
+                ? usage.billableCostMicro
+                : usage.ratedCostMicro || usage.realCostMicro) / 1000000
           } else {
             // Legacy fallback：旧数据没有存储费用，从 token 重算
             const usageData = {
@@ -506,7 +515,7 @@ router.post('/api/user-stats', async (req, res) => {
         const client = redis.getClientSafe()
         const requestCountKey = `rate_limit:requests:${keyId}`
         const tokenCountKey = `rate_limit:tokens:${keyId}`
-        const costCountKey = `rate_limit:cost:${keyId}` // 新增：费用计数key
+        const costCountKey = `rate_limit:cost:${keyId}`
         const windowStartKey = `rate_limit:window_start:${keyId}`
 
         currentWindowRequests = parseInt((await client.get(requestCountKey)) || '0')
@@ -966,6 +975,8 @@ router.post('/api/batch-model-stats', async (req, res) => {
                 allTokens: 0,
                 realCostMicro: 0,
                 ratedCostMicro: 0,
+                billableCostMicro: 0,
+                hasStoredBillableCost: false,
                 hasStoredCost: false
               })
             }
@@ -981,9 +992,13 @@ router.post('/api/batch-model-stats', async (req, res) => {
             modelUsage.allTokens += parseInt(data.allTokens) || 0
             modelUsage.realCostMicro += parseInt(data.realCostMicro) || 0
             modelUsage.ratedCostMicro += parseInt(data.ratedCostMicro) || 0
+            modelUsage.billableCostMicro += parseInt(data.billableCostMicro) || 0
             // 检查 Redis 数据是否包含成本字段
             if ('realCostMicro' in data || 'ratedCostMicro' in data) {
               modelUsage.hasStoredCost = true
+            }
+            if ('billableCostMicro' in data) {
+              modelUsage.hasStoredBillableCost = true
             }
           }
         }
@@ -1016,8 +1031,11 @@ router.post('/api/batch-model-stats', async (req, res) => {
       if (hasStoredCost) {
         costData.costs.real = (usage.realCostMicro || 0) / 1000000
         costData.costs.rated = (usage.ratedCostMicro || 0) / 1000000
-        costData.costs.total = costData.costs.real // 保持兼容
-        costData.formatted.total = `$${costData.costs.real.toFixed(6)}`
+        costData.costs.billable = usage.hasStoredBillableCost
+          ? (usage.billableCostMicro || 0) / 1000000
+          : costData.costs.rated
+        costData.costs.total = costData.costs.billable
+        costData.formatted.total = `$${costData.costs.billable.toFixed(6)}`
       }
 
       modelStats.push({
@@ -1558,15 +1576,20 @@ router.post('/api/user-model-stats', async (req, res) => {
         // 检查字段是否存在（而非 > 0），以支持真正的零成本场景
         const realCostMicro = parseInt(data.realCostMicro) || 0
         const ratedCostMicro = parseInt(data.ratedCostMicro) || 0
+        const billableCostMicro = parseInt(data.billableCostMicro) || 0
         const hasStoredCost = 'realCostMicro' in data || 'ratedCostMicro' in data
+        const hasStoredBillableCost = 'billableCostMicro' in data
         const costData = CostCalculator.calculateCost(usage, model)
 
         // 如果有存储的费用，覆盖计算的费用
         if (hasStoredCost) {
           costData.costs.real = realCostMicro / 1000000
           costData.costs.rated = ratedCostMicro / 1000000
-          costData.costs.total = costData.costs.real
-          costData.formatted.total = `$${costData.costs.real.toFixed(6)}`
+          costData.costs.billable = hasStoredBillableCost
+            ? billableCostMicro / 1000000
+            : costData.costs.rated
+          costData.costs.total = costData.costs.billable
+          costData.formatted.total = `$${costData.costs.billable.toFixed(6)}`
         }
 
         // alltime 键不存储 allTokens，需要计算
@@ -1604,7 +1627,16 @@ router.post('/api/user-model-stats', async (req, res) => {
     // 按总token数降序排列
     modelStats.sort((a, b) => b.allTokens - a.allTokens)
 
-    return res.json(await createModelStatsResponse(modelStats, period))
+    const costStats = await redis.getCostStats(keyId)
+    const billingCost =
+      period === 'daily'
+        ? costStats.daily
+        : period === 'alltime'
+          ? costStats.total
+          : costStats.monthly
+    const response = await createModelStatsResponse(modelStats, period)
+    response.billingCost = billingCost
+    return res.json(response)
   } catch (error) {
     logger.error('❌ Failed to process user model stats query:', error)
     return res.status(500).json({

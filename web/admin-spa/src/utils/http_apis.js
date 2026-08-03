@@ -86,6 +86,18 @@ export const toggleApiKeyApi = (id) =>
 export const deleteApiKeyApi = (id) => request({ url: `/admin/api-keys/${id}`, method: 'DELETE' })
 export const getApiKeyStatsApi = (id, params) =>
   request({ url: `/admin/api-keys/${id}/stats`, method: 'GET', params })
+export const getApiKeyMonthlyUsageApi = (id) =>
+  request({ url: `/admin/api-keys/${id}/monthly-usage`, method: 'GET' })
+export const resetApiKeyDailyUsageApi = (id) =>
+  request({ url: `/admin/api-keys/${id}/reset-daily-usage`, method: 'POST' })
+export const getApiKeyBillingMultiplierApi = (id) =>
+  request({ url: `/admin/api-keys/${encodeURIComponent(id)}/billing-multiplier`, method: 'GET' })
+export const updateApiKeyBillingMultiplierApi = (id, multiplier) =>
+  request({
+    url: `/admin/api-keys/${encodeURIComponent(id)}/billing-multiplier`,
+    method: 'PUT',
+    data: { multiplier }
+  })
 export const getApiKeyModelStatsApi = (id, params) =>
   request({ url: `/admin/api-keys/${id}/model-stats`, method: 'GET', params })
 export const getApiKeyTagsApi = () => request({ url: '/admin/api-keys/tags', method: 'GET' })

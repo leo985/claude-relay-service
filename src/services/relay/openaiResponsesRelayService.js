@@ -8,9 +8,9 @@ const unifiedOpenAIScheduler = require('../scheduler/unifiedOpenAIScheduler')
 const CodexToOpenAIConverter = require('../codexToOpenAI')
 const OpenAIResponsesAdapters = require('../openaiResponsesAdapters')
 const config = require('../../../config/config')
-const crypto = require('crypto')
 const LRUCache = require('../../utils/lruCache')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const { buildSessionHash, extractSessionIdentity } = require('../../utils/sessionIdentity')
 const {
   createRequestDetailMeta,
   extractOpenAICacheReadTokens
@@ -279,6 +279,9 @@ const RETRYABLE_NETWORK_ERROR_CODES = new Set([
   'EAI_AGAIN',
   'ENOTFOUND'
 ])
+const RETRYABLE_UPSTREAM_STATUS_CODES = new Set([500, 502, 503, 504, 529])
+const SERVER_ERROR_RETRY_MIN_DELAY_MS = 200
+const SERVER_ERROR_RETRY_MAX_DELAY_MS = 500
 
 const ANTHROPIC_OAUTH_BETA = 'oauth-2025-04-20'
 const ANTHROPIC_CLAUDE_CODE_BETA = 'claude-code-20250219'
@@ -308,6 +311,34 @@ class OpenAIResponsesRelayService {
       res.setHeader('Retry-After', String(resetsInSeconds))
     }
     return res.status(503).json(this._buildAllRateLimitedResponse(resetsInSeconds))
+  }
+
+  _sendAllUpstreamUnavailableResponse(res) {
+    return res.status(503).json({
+      error: {
+        message: 'All compatible upstream accounts are temporarily unavailable.',
+        type: 'service_unavailable',
+        code: 'all_upstream_accounts_unavailable'
+      }
+    })
+  }
+
+  _getServerErrorRetryDelayMs(options = {}) {
+    if (Number.isFinite(options.serverErrorRetryDelayMs)) {
+      return Math.max(0, Math.floor(options.serverErrorRetryDelayMs))
+    }
+    return (
+      SERVER_ERROR_RETRY_MIN_DELAY_MS +
+      Math.floor(
+        Math.random() * (SERVER_ERROR_RETRY_MAX_DELAY_MS - SERVER_ERROR_RETRY_MIN_DELAY_MS + 1)
+      )
+    )
+  }
+
+  async _sleep(delayMs) {
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
   }
 
   // 节流更新 lastUsedAt
@@ -896,14 +927,27 @@ class OpenAIResponsesRelayService {
     const failedAccountIds = Array.isArray(options.failedAccountIds)
       ? options.failedAccountIds.filter(Boolean)
       : []
+    const failedUpstreamStatuses = Array.isArray(options.failedUpstreamStatuses)
+      ? options.failedUpstreamStatuses.filter((status) => Number.isInteger(status))
+      : []
+    const sameAccountServerRetryCount =
+      options.serverErrorRetryAccountId === account?.id &&
+      Number.isInteger(options.sameAccountServerRetryCount)
+        ? options.sameAccountServerRetryCount
+        : 0
+    const failoverDeadlineAt = Number.isFinite(options.failoverDeadlineAt)
+      ? options.failoverDeadlineAt
+      : Date.now() + this.defaultTimeout
     const pendingNetworkFailures = Array.isArray(options.pendingNetworkFailures)
       ? options.pendingNetworkFailures
       : []
-    // 获取会话哈希（如果有的话）
-    const sessionId = req.headers['session_id'] || req.body?.session_id
-    const sessionHash = sessionId
-      ? crypto.createHash('sha256').update(sessionId).digest('hex')
-      : null
+    const hasCanonicalSessionHash = Object.prototype.hasOwnProperty.call(options, 'sessionHash')
+    const sessionHash = hasCanonicalSessionHash
+      ? options.sessionHash
+      : buildSessionHash(apiKeyData?.id, extractSessionIdentity(req))
+    if (!hasCanonicalSessionHash) {
+      options = { ...options, sessionHash }
+    }
 
     try {
       // 获取完整的账户信息（包含解密的 API Key）
@@ -943,6 +987,12 @@ class OpenAIResponsesRelayService {
 
       const headers = this._buildUpstreamHeaders(req, fullAccount, upstreamRequest)
       const isStream = upstreamRequest.body?.stream === true
+      const remainingRequestTimeMs = failoverDeadlineAt - Date.now()
+      if (remainingRequestTimeMs <= 0) {
+        req.removeListener('close', handleClientDisconnect)
+        res.removeListener('close', handleClientDisconnect)
+        return res.status(504).json(this._buildNetworkErrorResponse({ code: 'ETIMEDOUT' }).body)
+      }
 
       // 配置请求选项
       const requestOptions = {
@@ -950,7 +1000,7 @@ class OpenAIResponsesRelayService {
         url: targetUrl,
         headers,
         data: upstreamRequest.body,
-        timeout: this.defaultTimeout,
+        timeout: Math.max(1, Math.min(this.defaultTimeout, remainingRequestTimeMs)),
         responseType: isStream ? 'stream' : 'json',
         validateStatus: () => true, // 允许处理所有状态码
         signal: abortController.signal
@@ -1018,10 +1068,12 @@ class OpenAIResponsesRelayService {
         const nextFailedAccountIds = [
           ...new Set([...failedAccountIds, account?.id].filter(Boolean))
         ]
+        const nextFailedUpstreamStatuses = [...failedUpstreamStatuses, 429]
         const canRetryRateLimit =
           !res.headersSent &&
           !res.writableEnded &&
           !res.destroyed &&
+          Date.now() < failoverDeadlineAt &&
           (maxRateLimitRetries === null || rateLimitRetryAttempt < maxRateLimitRetries) &&
           typeof options.selectRetryAccount === 'function'
 
@@ -1044,7 +1096,9 @@ class OpenAIResponsesRelayService {
               return await this.handleRequest(req, res, retryAccount, apiKeyData, {
                 ...options,
                 rateLimitRetryAttempt: rateLimitRetryAttempt + 1,
-                failedAccountIds: nextFailedAccountIds
+                failedAccountIds: nextFailedAccountIds,
+                failedUpstreamStatuses: nextFailedUpstreamStatuses,
+                failoverDeadlineAt
               })
             }
 
@@ -1054,6 +1108,9 @@ class OpenAIResponsesRelayService {
           }
         }
 
+        if (nextFailedUpstreamStatuses.some((status) => status !== 429)) {
+          return this._sendAllUpstreamUnavailableResponse(res)
+        }
         return this._sendAllRateLimitedResponse(res, resetsInSeconds)
       }
 
@@ -1153,26 +1210,187 @@ class OpenAIResponsesRelayService {
             )
         }
 
-        // 处理 5xx 上游错误
-        if (response.status >= 500 && account?.id) {
-          try {
-            const oaiAutoProtectionDisabled =
-              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
-            if (!oaiAutoProtectionDisabled) {
-              await upstreamErrorHelper.markTempUnavailable(
-                account.id,
-                'openai-responses',
-                response.status
+        if (response.status === 403 && account?.id) {
+          logger.warn(`🚫 OpenAI Responses account permission denied (403) for ${account.id}`)
+
+          const oaiAutoProtectionDisabled =
+            account.disableAutoProtection === true || account.disableAutoProtection === 'true'
+          if (!oaiAutoProtectionDisabled) {
+            await upstreamErrorHelper
+              .markTempUnavailable(account.id, 'openai-responses', 403)
+              .catch(() => {})
+          }
+          if (sessionHash) {
+            await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+          }
+
+          const nextFailedAccountIds = [
+            ...new Set([...failedAccountIds, account.id].filter(Boolean))
+          ]
+          const nextFailedUpstreamStatuses = [...failedUpstreamStatuses, 403]
+          const canRetryPermissionError =
+            !res.headersSent &&
+            !res.writableEnded &&
+            !res.destroyed &&
+            Date.now() < failoverDeadlineAt &&
+            typeof options.selectRetryAccount === 'function'
+
+          if (canRetryPermissionError) {
+            if (handleClientDisconnect) {
+              req.removeListener('close', handleClientDisconnect)
+              res.removeListener('close', handleClientDisconnect)
+              handleClientDisconnect = null
+            }
+
+            try {
+              const retryAccount = await options.selectRetryAccount({
+                error: errorData,
+                failedAccount: account,
+                failedAccountIds: nextFailedAccountIds,
+                retryAttempt: nextFailedUpstreamStatuses.length - 1,
+                reason: 'permission_error',
+                statusCode: 403
+              })
+
+              if (retryAccount?.id && !nextFailedAccountIds.includes(retryAccount.id)) {
+                logger.warn(
+                  `🔁 Retrying OpenAI-Responses request after upstream 403 with account ${retryAccount.name || retryAccount.id}`
+                )
+                return await this.handleRequest(req, res, retryAccount, apiKeyData, {
+                  ...options,
+                  failedAccountIds: nextFailedAccountIds,
+                  failedUpstreamStatuses: nextFailedUpstreamStatuses,
+                  serverErrorRetryAccountId: null,
+                  sameAccountServerRetryCount: 0,
+                  failoverDeadlineAt
+                })
+              }
+
+              logger.warn('🔁 OpenAI-Responses 403 retry skipped: no alternate account available')
+            } catch (retryError) {
+              logger.warn('🔁 OpenAI-Responses 403 retry selection failed:', retryError)
+            }
+          }
+
+          if (handleClientDisconnect) {
+            req.removeListener('close', handleClientDisconnect)
+            res.removeListener('close', handleClientDisconnect)
+          }
+          return res
+            .status(403)
+            .json(upstreamErrorHelper.sanitizeErrorForClient(errorData, { statusCode: 403 }))
+        }
+
+        if (RETRYABLE_UPSTREAM_STATUS_CODES.has(response.status) && account?.id) {
+          if (sameAccountServerRetryCount < 1) {
+            const retryDelayMs = this._getServerErrorRetryDelayMs(options)
+            const canRetrySameAccount =
+              !res.headersSent &&
+              !res.writableEnded &&
+              !res.destroyed &&
+              Date.now() + retryDelayMs < failoverDeadlineAt
+
+            if (canRetrySameAccount) {
+              logger.warn(
+                `🔁 Retrying OpenAI-Responses request on the same account after upstream ${response.status} (${account.name || account.id}, 1/1)`
+              )
+              await this._sleep(retryDelayMs)
+              if (res.headersSent || res.writableEnded || res.destroyed) {
+                return undefined
+              }
+              if (Date.now() < failoverDeadlineAt) {
+                if (handleClientDisconnect) {
+                  req.removeListener('close', handleClientDisconnect)
+                  res.removeListener('close', handleClientDisconnect)
+                  handleClientDisconnect = null
+                }
+                return await this.handleRequest(req, res, account, apiKeyData, {
+                  ...options,
+                  serverErrorRetryAccountId: account.id,
+                  sameAccountServerRetryCount: sameAccountServerRetryCount + 1,
+                  failoverDeadlineAt
+                })
+              }
+            }
+          } else {
+            try {
+              const oaiAutoProtectionDisabled =
+                account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+              if (!oaiAutoProtectionDisabled) {
+                const enforceOverloadCooldown = response.status === 529
+                await upstreamErrorHelper.markTempUnavailable(
+                  account.id,
+                  'openai-responses',
+                  response.status,
+                  enforceOverloadCooldown ? 600 : null,
+                  null,
+                  enforceOverloadCooldown ? { ignoreDisableTempUnavailable: true } : undefined
+                )
+              }
+              if (sessionHash) {
+                await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+              }
+            } catch (markError) {
+              logger.warn(
+                'Failed to mark OpenAI-Responses account temporarily unavailable:',
+                markError
               )
             }
-            if (sessionHash) {
-              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+
+            const nextFailedAccountIds = [
+              ...new Set([...failedAccountIds, account.id].filter(Boolean))
+            ]
+            const nextFailedUpstreamStatuses = [...failedUpstreamStatuses, response.status]
+            const canRetryServerError =
+              !res.headersSent &&
+              !res.writableEnded &&
+              !res.destroyed &&
+              Date.now() < failoverDeadlineAt &&
+              typeof options.selectRetryAccount === 'function'
+
+            if (canRetryServerError) {
+              if (handleClientDisconnect) {
+                req.removeListener('close', handleClientDisconnect)
+                res.removeListener('close', handleClientDisconnect)
+                handleClientDisconnect = null
+              }
+
+              try {
+                const retryAccount = await options.selectRetryAccount({
+                  error: errorData,
+                  failedAccount: account,
+                  failedAccountIds: nextFailedAccountIds,
+                  retryAttempt: nextFailedUpstreamStatuses.length - 1,
+                  reason: 'server_error',
+                  statusCode: response.status
+                })
+
+                if (retryAccount?.id && !nextFailedAccountIds.includes(retryAccount.id)) {
+                  logger.warn(
+                    `🔁 Retrying OpenAI-Responses request after upstream ${response.status} with account ${retryAccount.name || retryAccount.id}`
+                  )
+                  return await this.handleRequest(req, res, retryAccount, apiKeyData, {
+                    ...options,
+                    failedAccountIds: nextFailedAccountIds,
+                    failedUpstreamStatuses: nextFailedUpstreamStatuses,
+                    serverErrorRetryAccountId: null,
+                    sameAccountServerRetryCount: 0,
+                    failoverDeadlineAt
+                  })
+                }
+
+                logger.warn(
+                  `🔁 OpenAI-Responses ${response.status} retry skipped: no alternate account available`
+                )
+              } catch (retryError) {
+                logger.warn(
+                  `🔁 OpenAI-Responses ${response.status} retry selection failed:`,
+                  retryError
+                )
+              }
+
+              return this._sendAllUpstreamUnavailableResponse(res)
             }
-          } catch (markError) {
-            logger.warn(
-              'Failed to mark OpenAI-Responses account temporarily unavailable:',
-              markError
-            )
           }
         }
 
@@ -1202,7 +1420,7 @@ class OpenAIResponsesRelayService {
             : upstreamRequest.upstreamModel || upstreamRequest.requestedModel,
           handleClientDisconnect,
           req,
-          { skipUsageRecord: options.skipUsageRecord === true }
+          { skipUsageRecord: options.skipUsageRecord === true, sessionHash }
         )
       }
 
@@ -1260,11 +1478,15 @@ class OpenAIResponsesRelayService {
       }
 
       const nextFailedAccountIds = [...new Set([...failedAccountIds, account?.id].filter(Boolean))]
+      const nextFailedUpstreamStatuses = networkErrorResponse
+        ? [...failedUpstreamStatuses, networkErrorResponse.status]
+        : failedUpstreamStatuses
       const canRetryNetworkError =
         isRetryableNetworkError &&
         !res.headersSent &&
         !res.writableEnded &&
         !res.destroyed &&
+        Date.now() < failoverDeadlineAt &&
         retryAttempt < maxNetworkRetries &&
         typeof options.selectRetryAccount === 'function'
 
@@ -1285,7 +1507,9 @@ class OpenAIResponsesRelayService {
               ...options,
               retryAttempt: retryAttempt + 1,
               failedAccountIds: nextFailedAccountIds,
-              pendingNetworkFailures: nextPendingNetworkFailures
+              failedUpstreamStatuses: nextFailedUpstreamStatuses,
+              pendingNetworkFailures: nextPendingNetworkFailures,
+              failoverDeadlineAt
             })
           }
 
@@ -1392,10 +1616,7 @@ class OpenAIResponsesRelayService {
           const retryAfterSeconds =
             errorData?.error?.resets_in_seconds ||
             upstreamErrorHelper.parseRetryAfter(error.response.headers)
-          return this._sendAllRateLimitedResponse(
-            res,
-            retryAfterSeconds
-          )
+          return this._sendAllRateLimitedResponse(res, retryAfterSeconds)
         }
 
         return res
@@ -1709,10 +1930,7 @@ class OpenAIResponsesRelayService {
       // 如果在流式响应中检测到限流
       if (rateLimitDetected) {
         // 使用统一调度器处理限流（与非流式响应保持一致）
-        const sessionId = req.headers['session_id'] || req.body?.session_id
-        const sessionHash = sessionId
-          ? crypto.createHash('sha256').update(sessionId).digest('hex')
-          : null
+        const sessionHash = options.sessionHash || null
 
         await unifiedOpenAIScheduler.markAccountRateLimited(
           account.id,

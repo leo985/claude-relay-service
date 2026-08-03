@@ -19,6 +19,7 @@ const {
   isOpenAINamespace,
   mergeRequestFeatures
 } = require('../utils/openaiCompatible')
+const { captureSessionIdentity } = require('../utils/sessionIdentity')
 
 const router = express.Router()
 
@@ -88,6 +89,9 @@ async function shouldRouteToOpenAICompatible(req, requestedModel, requestFeature
 
 // 🚀 智能后端路由处理器
 async function routeToBackend(req, res, requestedModel) {
+  // Capture explicit identity before any Chat Completions payload conversion mutates req.body.
+  captureSessionIdentity(req)
+
   // 检查权限
   const { permissions } = req.apiKey
   const requestFeatures =
