@@ -6,6 +6,7 @@
  *
  * @module sseParser
  */
+const { StringDecoder } = require('string_decoder')
 
 /**
  * 解析单行 SSE 数据
@@ -54,15 +55,16 @@ function parseSSELine(line) {
 class IncrementalSSEParser {
   constructor() {
     this.buffer = ''
+    this.decoder = new StringDecoder('utf8')
   }
 
   /**
    * 添加数据块并返回完整的事件
-   * @param {string} chunk - 数据块
+   * @param {string|Buffer} chunk - 数据块
    * @returns {Array<Object>} 解析出的完整事件数组
    */
   feed(chunk) {
-    this.buffer += chunk
+    this.buffer += Buffer.isBuffer(chunk) ? this.decoder.write(chunk) : chunk
     const events = []
 
     // 查找完整的事件（以 \n\n 分隔）
@@ -109,6 +111,7 @@ class IncrementalSSEParser {
    */
   reset() {
     this.buffer = ''
+    this.decoder = new StringDecoder('utf8')
   }
 }
 

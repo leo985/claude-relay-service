@@ -1849,7 +1849,8 @@ class OpenAIResponsesRelayService {
       }
     }
 
-    // 监听数据流
+    // 监听数据流；跨数据块保留未完成的 UTF-8 字符。
+    response.data.setEncoding?.('utf8')
     response.data.on('data', (chunk) => {
       try {
         const chunkStr = chunk.toString()
