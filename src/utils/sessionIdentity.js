@@ -19,6 +19,8 @@ function extractSessionIdentity(req = {}) {
     headers.session_id,
     body.session_id,
     body.conversation_id,
+    body.client_metadata?.session_id,
+    body.client_metadata?.thread_id,
     body.prompt_cache_key,
     body.metadata?.session_id
   ]

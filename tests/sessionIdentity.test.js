@@ -11,10 +11,38 @@ describe('sessionIdentity', () => {
     [{ headers: { session_id: 'header-session' } }, 'header-session'],
     [{ body: { session_id: 'body-session' } }, 'body-session'],
     [{ body: { conversation_id: 'conversation' } }, 'conversation'],
+    [{ body: { client_metadata: { session_id: 'codex-session' } } }, 'codex-session'],
+    [{ body: { client_metadata: { thread_id: 'codex-thread' } } }, 'codex-thread'],
     [{ body: { prompt_cache_key: 'cache-key' } }, 'cache-key'],
     [{ body: { metadata: { session_id: 'metadata-session' } } }, 'metadata-session']
   ])('extracts an explicit session identity from supported request fields', (req, expected) => {
     expect(extractSessionIdentity(req)).toBe(expected)
+  })
+
+  test('prefers Codex session identity over its cache key and thread fallback', () => {
+    expect(
+      extractSessionIdentity({
+        body: {
+          prompt_cache_key: 'cache-key',
+          client_metadata: { session_id: 'codex-session', thread_id: 'codex-thread' }
+        }
+      })
+    ).toBe('codex-session')
+  })
+
+  test('skips invalid Codex identities and keeps a captured identity across conversion', () => {
+    expect(
+      extractSessionIdentity({
+        body: {
+          client_metadata: { session_id: ' ', thread_id: 123 },
+          prompt_cache_key: 'cache-key'
+        }
+      })
+    ).toBe('cache-key')
+    const req = { body: { client_metadata: { session_id: 'codex-session' } } }
+    expect(captureSessionIdentity(req)).toBe('codex-session')
+    req.body = { prompt_cache_key: 'converted-cache' }
+    expect(extractSessionIdentity(req)).toBe('codex-session')
   })
 
   test('prefers a captured pre-conversion identity over the mutated request body', () => {

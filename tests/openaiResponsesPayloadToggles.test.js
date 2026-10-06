@@ -1,4 +1,5 @@
 const crypto = require('crypto')
+const { EventEmitter } = require('events')
 
 const mockRouter = {
   get: jest.fn(),
@@ -120,6 +121,156 @@ const RESPONSES_REQUEST_FEATURES = {
   allowOpenAITokenForAnthropicImages: false,
   allowOpenAITokenForOpenAICompatibleImages: false
 }
+
+describe('native Codex session headers', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    unifiedOpenAIScheduler.selectAccountForApiKey.mockReset().mockResolvedValue({
+      accountId: 'openai-1',
+      accountType: 'openai'
+    })
+    openaiAccountService.getAccount.mockReset().mockResolvedValue({
+      id: 'openai-1',
+      name: 'OpenAI Account',
+      accessToken: 'encrypted-token',
+      accountId: 'chatgpt-account'
+    })
+    openaiAccountService.decrypt.mockReturnValue('decrypted-token')
+    axios.post.mockReset().mockResolvedValue({
+      status: 200,
+      headers: {},
+      data: { usage: { input_tokens: 8, output_tokens: 4, total_tokens: 12 } }
+    })
+  })
+
+  test('forwards a body-only Codex session without rewriting the prompt', async () => {
+    const body = {
+      model: 'gpt-6.1-sol',
+      stream: false,
+      store: false,
+      prompt_cache_key: 'cache-accounting-key',
+      client_metadata: { session_id: 'codex-session', thread_id: 'codex-thread' },
+      input: [{ role: 'user', content: 'unchanged input' }]
+    }
+    const req = createReq({ path: '/responses', body, userAgent: 'codex-tui/0.160.0' })
+
+    await openaiRoutes.handleResponses(req, createRes())
+
+    expect(axios.post).toHaveBeenCalledWith(
+      'https://chatgpt.com/backend-api/codex/responses',
+      body,
+      expect.objectContaining({
+        headers: expect.objectContaining({ session_id: 'codex-session' })
+      })
+    )
+    expect(unifiedOpenAIScheduler.selectAccountForApiKey.mock.calls[0][1]).toBe(
+      createHash('codex-session')
+    )
+  })
+
+  test('uses the body session for a streaming request and keeps forwarding SSE data', async () => {
+    const stream = new EventEmitter()
+    axios.post.mockResolvedValue({ status: 200, headers: {}, data: stream })
+    const req = createReq({
+      path: '/responses',
+      userAgent: 'codex-tui/0.160.0',
+      body: {
+        model: 'gpt-6.1-sol',
+        stream: true,
+        client_metadata: { session_id: 'stream-session' }
+      }
+    })
+    req.on = jest.fn()
+    const res = createRes()
+    res.write = jest.fn()
+    const ended = new Promise((resolve) => {
+      res.end = jest.fn(resolve)
+    })
+
+    await openaiRoutes.handleResponses(req, res)
+
+    expect(axios.post.mock.calls[0][2]).toEqual(
+      expect.objectContaining({
+        responseType: 'stream',
+        headers: expect.objectContaining({ session_id: 'stream-session' })
+      })
+    )
+    expect(res.statusCode).toBe(200)
+    const chunk = Buffer.from('data: {"type":"response.completed"}\n\n')
+    stream.emit('data', chunk)
+    stream.emit('end')
+    await ended
+    expect(res.write).toHaveBeenCalledWith(chunk)
+  })
+
+  test('preserves the session header for compact requests', async () => {
+    const req = createReq({
+      path: '/responses/compact',
+      userAgent: 'codex-tui/0.160.0',
+      body: {
+        model: 'gpt-6.1-sol',
+        stream: false,
+        client_metadata: { session_id: 'compact-session' }
+      }
+    })
+
+    await openaiRoutes.handleResponses(req, createRes())
+
+    expect(axios.post).toHaveBeenCalledWith(
+      'https://chatgpt.com/backend-api/codex/responses/compact',
+      expect.any(Object),
+      expect.objectContaining({
+        headers: expect.objectContaining({ session_id: 'compact-session' })
+      })
+    )
+  })
+
+  test.each([
+    [{ session_id: 'explicit-session', 'x-session-id': 'alternate-session' }, 'explicit-session'],
+    [{ session_id: ' ' }, 'codex-session'],
+    [{}, 'codex-session']
+  ])(
+    'preserves a valid native header and fills missing or blank headers',
+    async (headers, expected) => {
+      const req = createReq({
+        path: '/responses',
+        userAgent: 'codex-tui/0.160.0',
+        body: {
+          model: 'gpt-6.1-sol',
+          stream: false,
+          client_metadata: { session_id: 'codex-session' }
+        }
+      })
+      Object.assign(req.headers, headers)
+
+      await openaiRoutes.handleResponses(req, createRes())
+
+      expect(axios.post.mock.calls[0][2].headers.session_id).toBe(expected)
+    }
+  )
+
+  test.each([
+    [{ client_metadata: { thread_id: 'codex-thread' } }, 'codex-thread'],
+    [{ prompt_cache_key: 'legacy-cache-key' }, 'legacy-cache-key'],
+    [{}, undefined]
+  ])(
+    'supports legacy identity fallbacks without inventing a shared session',
+    async (identity, expected) => {
+      const req = createReq({
+        path: '/responses',
+        userAgent: 'codex-tui/0.160.0',
+        body: { model: 'gpt-6.1-sol', stream: false, ...identity }
+      })
+
+      await openaiRoutes.handleResponses(req, createRes())
+
+      expect(axios.post.mock.calls[0][2].headers.session_id).toBe(expected)
+      if (!expected) {
+        expect(axios.post.mock.calls[0][2].headers).not.toHaveProperty('session_id')
+      }
+    }
+  )
+})
 
 function createReq({
   path = '/v1/responses',
@@ -714,9 +865,11 @@ describe('openai responses payload toggles', () => {
         accountId: 'openai-1',
         accountType: 'openai'
       })
-      .mockRejectedValueOnce(Object.assign(new Error('No available OpenAI account found'), {
-        statusCode: 402
-      }))
+      .mockRejectedValueOnce(
+        Object.assign(new Error('No available OpenAI account found'), {
+          statusCode: 402
+        })
+      )
     openaiAccountService.getAccount.mockResolvedValue({
       id: 'openai-1',
       name: 'Primary OpenAI',

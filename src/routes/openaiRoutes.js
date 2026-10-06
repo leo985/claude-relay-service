@@ -656,13 +656,22 @@ const handleResponses = async (req, res) => {
     // 基于白名单构造上游所需的请求头，确保键为小写且值受控
     const incoming = req.headers || {}
 
-    const allowedKeys = ['version', 'openai-beta', 'session_id']
+    const allowedKeys = ['version', 'openai-beta']
 
     const headers = {}
     for (const key of allowedKeys) {
       if (incoming[key] !== undefined) {
         headers[key] = incoming[key]
       }
+    }
+
+    // Recent Codex clients carry session identity in client_metadata instead of a header.
+    // The Codex backend still needs the header for stable cache routing.
+    const hasSessionHeader =
+      typeof incoming.session_id === 'string' && incoming.session_id.trim().length > 0
+    const upstreamSessionId = hasSessionHeader ? incoming.session_id : extractSessionIdentity(req)
+    if (upstreamSessionId) {
+      headers.session_id = upstreamSessionId
     }
 
     // 覆盖或新增必要头部
